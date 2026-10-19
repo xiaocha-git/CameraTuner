@@ -33,3 +33,36 @@ google-services.json
 
 # Android Profiling
 *.hprof
+
+# ===== CameraTuner 手工构建项目 =====
+
+# 构建输出
+CameraTuner/build/
+CameraTuner/out/
+CameraTuner/*.apk
+CameraTuner/*.unsigned
+CameraTuner/*.unsigned.apk
+
+# SDK 与依赖（体积大，不入库）
+CameraTuner/sdk/
+
+# 生成的 R.java
+CameraTuner/build/gen/
+
+# 编译中间产物
+*.dex
+*.class
+*.flat
+*.zip
+
+# 临时文件
+*.bak
+*.bak*
+*.tmp
+*.orig
+*.rej
+
+# 编辑器
+.vscode/
+*.swp
+*~
