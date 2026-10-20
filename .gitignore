@@ -1,68 +1,26 @@
-# Gradle files
-.gradle/
+# ===== CameraTuner .gitignore =====
+# 说明：本仓库只发「源码 + 构建脚本」，工具链与产物一律不入库。
+
+# --- 工具链（自己本地有，别人自己有 Android SDK）---
+sdk/
+
+# --- 构建中间产物 / 输出 ---
 build/
-.kotlin/
-
-# Local configuration file (sdk path, etc)
-local.properties
-
-# Log/OS Files
-*.log
-
-# Android Studio generated files and folders
-captures/
-.externalNativeBuild/
-.cxx/
-*.aab
-*.apk
-output-metadata.json
-
-# IntelliJ
-*.iml
-.idea/
-misc.xml
-deploymentTargetDropDown.xml
-render.experimental.xml
-
-# Keystore files
-*.jks
-*.keystore
-
-# Google Services (e.g. APIs or Firebase)
-google-services.json
-
-# Android Profiling
-*.hprof
-
-# ===== CameraTuner 手工构建项目 =====
-
-# 构建输出
-CameraTuner/build/
-CameraTuner/out/
-CameraTuner/*.apk
-CameraTuner/*.unsigned
-CameraTuner/*.unsigned.apk
-
-# SDK 与依赖（体积大，不入库）
-CameraTuner/sdk/
-
-# 生成的 R.java
-CameraTuner/build/gen/
-
-# 编译中间产物
+out/
 *.dex
 *.class
-*.flat
 *.zip
+gen/
 
-# 临时文件
+# --- APK 产物（发 Releases，不进仓库）---
+*.apk
+*.apk.bak*
 *.bak
-*.bak*
-*.tmp
+*.bak_*
 *.orig
-*.rej
 
-# 编辑器
-.vscode/
-*.swp
+# --- 编辑器 / 系统杂物 ---
 *~
+.DS_Store
+Thumbs.db
+.nomedia

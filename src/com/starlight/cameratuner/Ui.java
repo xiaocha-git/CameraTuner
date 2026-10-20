@@ -1,0 +1,289 @@
+package com.starlight.cameratuner;
+
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
+import android.util.TypedValue;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.Switch;
+import android.widget.TextView;
+
+/** UI 工具方法 */
+public class Ui {
+
+    // ---------- 页面框架 ----------
+
+    static LinearLayout pageTitle(final MainActivity a, final String text) {
+        LinearLayout wrap = new LinearLayout(a);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+        wrap.setPadding(a.dp(8), a.dp(20), a.dp(8), a.dp(18));
+
+        final TextView t = new TextView(a) {
+            private android.graphics.LinearGradient gradient;
+
+            @Override
+            protected void onSizeChanged(int w, int h, int ow, int oh) {
+                super.onSizeChanged(w, h, ow, oh);
+                if (w > 0) {
+                    gradient = new android.graphics.LinearGradient(
+                            0, 0, w, 0,
+                            new int[]{0xFF5FA8C8, 0xFF8E7FC8, 0xFFC97FA8},
+                            new float[]{0f, 0.5f, 1f},
+                            android.graphics.Shader.TileMode.CLAMP);
+                    getPaint().setShader(gradient);
+                    invalidate();
+                }
+            }
+
+            @Override
+            protected void onDraw(android.graphics.Canvas c) {
+                if (gradient != null) getPaint().setShader(gradient);
+                super.onDraw(c);
+            }
+        };
+        t.setText(text);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 30);
+        t.setTextColor(0xFF5FA8C8);
+        t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        wrap.addView(t);
+        return wrap;
+    }
+
+    static TextView sectionLabel(MainActivity a, String text) {
+        TextView t = new TextView(a);
+        t.setText(text);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        t.setTextColor(MainActivity.C_TEXT_SUB);
+        t.setPadding(a.dp(10), a.dp(22), 0, a.dp(10));
+        return t;
+    }
+
+    static ScrollView wrap(ScrollView sv) {
+        return sv;
+    }
+
+    // ---------- 卡片 ----------
+
+    static LinearLayout card(MainActivity a) {
+        LinearLayout card = new LinearLayout(a);
+        card.setOrientation(LinearLayout.VERTICAL);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(MainActivity.C_CARD);
+        bg.setCornerRadius(a.dp(20));
+        card.setBackground(bg);
+        card.setElevation(a.dp(1));
+        card.setClipToOutline(true);
+        return card;
+    }
+
+    static void divider(MainActivity a, LinearLayout card) {
+        View v = new View(a);
+        v.setBackgroundColor(0xFFEDEDF0);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, a.dp(1));
+        lp.leftMargin = a.dp(20);
+        lp.rightMargin = a.dp(20);
+        card.addView(v, lp);
+    }
+
+    // ---------- 行 ----------
+
+    /** 信息行：左标签 右值 */
+    static void infoRow(MainActivity a, LinearLayout card, String label, String value) {
+        infoRow(a, card, label, value, MainActivity.C_TEXT_SUB);
+    }
+
+    static void infoRow(MainActivity a, LinearLayout card, String label, String value, int valueColor) {
+        LinearLayout row = new LinearLayout(a);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(a.dp(20), a.dp(17), a.dp(20), a.dp(17));
+
+        TextView l = new TextView(a);
+        l.setText(label);
+        l.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        l.setTextColor(MainActivity.C_TEXT_MAIN);
+        l.setLayoutParams(new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row.addView(l);
+
+        TextView v = new TextView(a);
+        v.setText(value);
+        v.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        v.setTextColor(valueColor);
+        row.addView(v);
+
+        card.addView(row);
+    }
+
+    /** 可点击行（带右箭头） */
+    static void clickRow(MainActivity a, LinearLayout card, String title, String desc, final Runnable onClick) {
+        LinearLayout row = new LinearLayout(a);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(a.dp(20), a.dp(16), a.dp(16), a.dp(16));
+        row.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { onClick.run(); }
+        });
+
+        LinearLayout col = new LinearLayout(a);
+        col.setOrientation(LinearLayout.VERTICAL);
+        col.setLayoutParams(new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView t = new TextView(a);
+        t.setText(title);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        t.setTextColor(MainActivity.C_TEXT_MAIN);
+        col.addView(t);
+
+        if (desc != null && !desc.isEmpty()) {
+            TextView d = new TextView(a);
+            d.setText(desc);
+            d.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+            d.setTextColor(MainActivity.C_TEXT_SUB);
+            d.setPadding(0, a.dp(3), 0, 0);
+            col.addView(d);
+        }
+        row.addView(col);
+
+        TextView arrow = new TextView(a);
+        arrow.setText("›");
+        arrow.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
+        arrow.setTextColor(0xFFC7C7CC);
+        arrow.setPadding(a.dp(8), 0, 0, 0);
+        row.addView(arrow);
+
+        card.addView(row);
+    }
+
+    /** 开关行 */
+    static void switchRow(MainActivity a, LinearLayout card, final String key,
+                          String title, String desc, int iconRes,
+                          final java.util.Map<String, CapsuleSwitch> registry) {
+        LinearLayout row = new LinearLayout(a);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(a.dp(20), a.dp(14), a.dp(14), a.dp(14));
+
+        if (iconRes != 0) {
+            ImageView iv = new ImageView(a);
+            iv.setImageResource(iconRes);
+            iv.setColorFilter(MainActivity.C_ACCENT);
+            LinearLayout.LayoutParams ip = new LinearLayout.LayoutParams(a.dp(22), a.dp(22));
+            ip.rightMargin = a.dp(14);
+            iv.setLayoutParams(ip);
+            row.addView(iv);
+        }
+
+        LinearLayout col = new LinearLayout(a);
+        col.setOrientation(LinearLayout.VERTICAL);
+        col.setLayoutParams(new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView t = new TextView(a);
+        t.setText(title);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        t.setTextColor(MainActivity.C_TEXT_MAIN);
+        col.addView(t);
+
+        if (desc != null && !desc.isEmpty()) {
+            TextView d = new TextView(a);
+            d.setText(desc);
+            d.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+            // 含"请勿"的说明用警告色
+            d.setTextColor(desc.contains("请勿") ? MainActivity.C_ACCENT : MainActivity.C_TEXT_SUB);
+            d.setPadding(0, a.dp(4), 0, 0);
+            col.addView(d);
+        }
+        row.addView(col);
+
+        CapsuleSwitch sw = new CapsuleSwitch(a);
+        sw.setAccentColor(MainActivity.C_ACCENT);
+        LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(a.dp(52), a.dp(32));
+        sw.setLayoutParams(sp);
+        row.addView(sw);
+        if (registry != null) registry.put(key, sw);
+
+        card.addView(row);
+    }
+
+    /** 可点击编辑行：点击弹窗编辑 */
+    static void editRow(final MainActivity a, LinearLayout card, final String key,
+                        String title, String desc,
+                        java.util.Map<String, android.widget.EditText> registry) {
+        LinearLayout row = new LinearLayout(a);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(a.dp(20), a.dp(16), a.dp(16),
+                desc != null && !desc.isEmpty() ? a.dp(6) : a.dp(16));
+
+        LinearLayout col = new LinearLayout(a);
+        col.setOrientation(LinearLayout.VERTICAL);
+        col.setLayoutParams(new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView t = new TextView(a);
+        t.setText(title);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        t.setTextColor(MainActivity.C_TEXT_MAIN);
+        col.addView(t);
+
+        if (desc != null && !desc.isEmpty()) {
+            TextView d = new TextView(a);
+            d.setText(desc);
+            d.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+            d.setTextColor(MainActivity.C_TEXT_SUB);
+            d.setPadding(0, a.dp(4), 0, 0);
+            col.addView(d);
+        }
+        row.addView(col);
+
+        TextView valueView = new TextView(a);
+        valueView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        valueView.setTextColor(MainActivity.C_TEXT_SUB);
+        valueView.setPadding(a.dp(8), 0, 0, 0);
+        valueView.setTag("value:" + key);
+        row.addView(valueView);
+
+        TextView arrow = new TextView(a);
+        arrow.setText("›");
+        arrow.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
+        arrow.setTextColor(0xFFC7C7CC);
+        arrow.setPadding(a.dp(6), 0, 0, 0);
+        row.addView(arrow);
+
+        row.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                String cur = a.readConfig().get(key);
+                showEditDialog(a, key, cur == null ? "" : cur, registry);
+            }
+        });
+
+        card.addView(row);
+    }
+
+    /** 弹出编辑对话框 */
+    static void showEditDialog(final MainActivity a, final String key, String current,
+                               final java.util.Map<String, android.widget.EditText> registry) {
+        final String k = key;
+        TunerDialog td = TunerDialog.create(a)
+                .title(k)
+                .editable(current)
+                .singleLine()
+                .positive("保存", new TunerDialog.OnAction() {
+                    public void onClick(TunerDialog d) {
+                        android.widget.EditText e = d.getEditText();
+                        if (e != null) {
+                            a.writeConfig(k, e.getText().toString().trim());
+                            a.refreshCurrentPage();
+                        }
+                    }
+                });
+        td.show();
+    }
+}
