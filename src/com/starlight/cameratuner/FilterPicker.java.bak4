@@ -1,0 +1,522 @@
+package com.starlight.cameratuner;
+
+import android.app.AlertDialog;
+import android.content.DialogInterface;
+import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
+import android.util.TypedValue;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.TextView;
+
+/**
+ * 传奇一瞬色彩 —— 滤镜选择弹窗。
+ *
+ * 42 个 CubeLut 滤镜分四组：胶片复古 / 人像日常 / 基础自然 / 美颜视频。
+ * 每行左侧显示三段式渐变条（左→中→右），示意该滤镜的色调倾向。
+ * 选择结果写回 config.conf 的 legend.filter.m3 / .m9 / .m10r。
+ */
+public final class FilterPicker {
+
+    /**
+     * {id, 英文名, 中文名, 分组, 左色, 中色, 右色, 效果说明}
+     * 分组：0胶片 1人像 2基础 3美颜
+     */
+    private static final Object[][] FILTERS = {
+            // ── 胶片复古 ──
+            {60, "NEGATIVE_FILM", "负片", 0,
+                    0xFF2E4A4F, 0xFFC77A6A, 0xFFF2D7B6, "暗部青绿、高光暖奶油，青橙负片感"},
+            {71, "FILM", "胶片", 0,
+                    0xFF3B3A2F, 0xFFB88A5A, 0xFFF2E3C6, "暖棕胶片、轻微褪色"},
+            {72, "JAPANESE", "日系", 0,
+                    0xFFA8C8D8, 0xFFE8DCCB, 0xFFF6F1E8, "低对比、冷蓝阴影、奶白高光"},
+            {79, "N_600_F", "宝丽来600", 0,
+                    0xFF7A8F8C, 0xFFD9B08C, 0xFFF4E8D0, "宝丽来褪色，青灰暗部配暖黄高光"},
+            {80, "BF_70", "复古70", 0,
+                    0xFF6B4F3A, 0xFFC89B6A, 0xFFEED9B0, "70年代棕黄复古，低饱和暖调"},
+            {81, "R_600", "复古600", 0,
+                    0xFF5E4A42, 0xFFB77A5E, 0xFFE7C9A8, "红棕复古，暗部褐、高光杏色"},
+            {82, "P_100F", "富士100F", 0,
+                    0xFF3E6B6A, 0xFF8FB7A8, 0xFFE5D9B8, "富士青绿，冷调偏青"},
+            {83, "F_50", "富士50", 0,
+                    0xFF4F7D86, 0xFFA7C4B7, 0xFFF0E6CC, "青蓝胶片，低饱和清冷"},
+            {84, "KC_64", "柯达64", 0,
+                    0xFF5A3F2E, 0xFFC46A3F, 0xFFF2C98E, "暖橙红黄，柯达复古浓郁"},
+            {85, "V_250", "威士忌250", 0,
+                    0xFF4A2E1E, 0xFFA85F2A, 0xFFE8B56B, "威士忌琥珀棕橙，暖暗调"},
+            {86, "H_400", "黑白400", 0,
+                    0xFF1E1E1E, 0xFF7A7A7A, 0xFFE6E6E6, "高对比黑白，颗粒纪实感"},
+            {87, "KP_160", "柯达160", 0,
+                    0xFF6B4A3A, 0xFFD18B63, 0xFFF3D9B5, "柯达人像暖调，蜜桃肤色"},
+            {88, "FC_400", "富士400", 0,
+                    0xFF3F5F5A, 0xFF8FAF9C, 0xFFE7D8B8, "富士绿青，日常胶片"},
+            {89, "C_50D", "佳能50D", 0,
+                    0xFF5A5F62, 0xFFB8A48C, 0xFFF0E8DA, "佳能中性偏暖，低饱和干净"},
+            {90, "KG_200", "柯达200", 0,
+                    0xFF5C3D2E, 0xFFC97A4A, 0xFFF0C98A, "暖橙红黄，阳光感"},
+
+            // ── 人像日常 ──
+            {57, "FLOWER_DREAM", "繁花如梦", 1,
+                    0xFFE8935B, 0xFFF5C08A, 0xFFFBE9D2, "落日暖橙，柔和暖调"},
+            {58, "WARM_BLUE", "暖蓝", 1,
+                    0xFF6F8FA8, 0xFFA9C3D4, 0xFFF0E2D0, "蓝中带暖，冷背景暖肤色"},
+            {59, "FOREST_GREEN", "森绿", 1,
+                    0xFF3F5B45, 0xFF7E9B78, 0xFFE3D8B8, "森林绿低饱和，自然安静"},
+            {63, "HOLIDAY", "假日", 1,
+                    0xFFF28C5B, 0xFFF7D08A, 0xFF9AD1E3, "明快假日感，暖橙配天蓝"},
+            {64, "OXYGEN", "氧气", 1,
+                    0xFFA8D8C8, 0xFFD9F0E4, 0xFFF7FBF2, "清透氧气感，淡绿白"},
+            {65, "MINT", "薄荷", 1,
+                    0xFF7FD6C2, 0xFFC8F0E6, 0xFFF5FFFC, "清凉薄荷，干净透亮"},
+            {66, "COLD_WHITE", "冷白", 1,
+                    0xFFB8C9D9, 0xFFE6EEF5, 0xFFFFFFFF, "冷白清透，低饱和偏冷"},
+            {67, "SHALLOTS", "葱绿", 1,
+                    0xFF6F9A5A, 0xFFA8C68F, 0xFFE8EFD8, "葱绿清新，草本自然"},
+            {68, "PINK_ORANGE", "粉橙", 1,
+                    0xFFF08A8A, 0xFFF7B58A, 0xFFFBE0C4, "粉橙暖甜，肤色柔和"},
+            {69, "LIVELY", "生动", 1,
+                    0xFFE85D4A, 0xFFF2B84B, 0xFF4FB3D9, "高饱和生动，红黄蓝对比强"},
+            {70, "DELICACY", "精致", 1,
+                    0xFFC9A6A0, 0xFFE8D5C8, 0xFFF7F0E8, "精致低饱和，裸粉杏色"},
+            {74, "PINK", "粉色", 1,
+                    0xFFF2A6C0, 0xFFFAD1DF, 0xFFFFF0F5, "纯粉柔调，甜美低对比"},
+            {75, "LILT", "轻快", 1,
+                    0xFFF6C85F, 0xFFF6A6A6, 0xFF9BD7E8, "轻快糖果色，明亮活泼"},
+            {76, "BLACKGOLD", "黑金", 1,
+                    0xFF1C1A17, 0xFF8A6A2F, 0xFFE7C46A, "黑金暗调，高对比金属暖光"},
+
+            // ── 基础自然 ──
+            {61, "DISTINCT", "鲜明", 2,
+                    0xFFD6453D, 0xFFF2C14E, 0xFF3E8ED0, "高饱和鲜明，色彩对比强"},
+            {62, "ORIGINAL", "原色", 2,
+                    0xFF7F8C8D, 0xFFC9B8A8, 0xFFF5F0E8, "原色中性，轻微暖灰"},
+            {73, "NATURE", "自然", 2,
+                    0xFF6B8E5A, 0xFFC9B98A, 0xFFE8E2D0, "自然绿黄，低饱和日常"},
+            {77, "WHITEANDBLACK", "黑白", 2,
+                    0xFF111111, 0xFF808080, 0xFFF2F2F2, "纯黑白，中性灰阶"},
+            {78, "CLASSIC", "经典", 2,
+                    0xFF3F4A5A, 0xFFB89B7A, 0xFFF0E6D2, "经典低饱和暖灰，稳重"},
+            {91, "NEUTRAL", "中性", 2,
+                    0xFF7A7F82, 0xFFC4BDB2, 0xFFF2EEE8, "中性灰低饱和，干净耐看"},
+            {92, "SOFT", "柔和", 2,
+                    0xFFD9C7D2, 0xFFE8E0D8, 0xFFF8F6F2, "柔和低对比，朦胧柔光"},
+
+            // ── 美颜视频 ──
+            {93, "WHITENING", "美白", 3,
+                    0xFFE8D8C8, 0xFFF5EEE6, 0xFFFFFFFF, "提亮肤色、白皙柔光"},
+            {94, "BRIGHT_SHINING", "闪耀", 3,
+                    0xFFF6D98A, 0xFFFFF1C9, 0xFFFFFFFF, "闪耀亮金，高光通透"},
+            {95, "FRESHNESS", "清新", 3,
+                    0xFFA8D8C8, 0xFFD9F0E6, 0xFFFFFFFF, "清新透亮，淡青白"},
+            {96, "CLEARNESS", "清晰", 3,
+                    0xFFB8C9D9, 0xFFE6EEF5, 0xFFFFFFFF, "清晰冷白，干净锐利"},
+            {102, "DOLBY", "杜比", 3,
+                    0xFF0F1A24, 0xFF7A8A99, 0xFFFFFFFF, "高动态对比，暗部深、高光白"},
+            {103, "DOLBY_BRIGHTNESS", "杜比明亮", 3,
+                    0xFF2A2A2A, 0xFFB8C9D9, 0xFFFFFFFF, "提亮暗部，整体明亮通透"},
+    };
+
+    private static final String[] GROUPS = {
+            "胶片复古", "人像日常", "基础自然", "美颜视频"};
+
+    /** 三个配置键的默认滤镜 id */
+    public static final String KEY_M3 = "legend.filter.m3";
+    public static final String KEY_M9 = "legend.filter.m9";
+    public static final String KEY_M10R = "legend.filter.m10r";
+    public static final int DEF_M3 = 86;
+    public static final int DEF_M9 = 84;
+    public static final int DEF_M10R = 73;
+
+    private FilterPicker() {
+    }
+
+    /** 按 id 取中文名 */
+    public static String nameOf(int id) {
+        for (Object[] f : FILTERS) {
+            if (((Integer) f[0]).intValue() == id) {
+                return (String) f[2];
+            }
+        }
+        return "滤镜 " + id;
+    }
+
+    /** 按 key 取默认 id */
+    public static int defaultOf(String key) {
+        if (KEY_M3.equals(key)) {
+            return DEF_M3;
+        }
+        if (KEY_M9.equals(key)) {
+            return DEF_M9;
+        }
+        if (KEY_M10R.equals(key)) {
+            return DEF_M10R;
+        }
+        return -1;
+    }
+
+    /** 渐变背景 */
+    private static GradientDrawable gradient(int left, int mid, int right) {
+        GradientDrawable g = new GradientDrawable(
+                GradientDrawable.Orientation.LEFT_RIGHT,
+                new int[]{left, mid, right});
+        g.setCornerRadius(8f);
+        return g;
+    }
+
+    /** 弹出滤镜选择器（分组卡片式） */
+    public static void show(final MainActivity a, final String key, int current) {
+        final android.app.Dialog dlg = new android.app.Dialog(a);
+        dlg.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
+
+        LinearLayout root = new LinearLayout(a);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(a.dp(16), a.dp(18), a.dp(16), a.dp(14));
+
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(0xF7FFFFFF);
+        bg.setCornerRadius(a.dp(26));
+        bg.setStroke(a.dp(1), 0xE6FFFFFF);
+        root.setBackground(bg);
+
+        // ---------- 标题 ----------
+        LinearLayout titleRow = new LinearLayout(a);
+        titleRow.setOrientation(LinearLayout.HORIZONTAL);
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
+
+        LinearLayout tcol = new LinearLayout(a);
+        tcol.setOrientation(LinearLayout.VERTICAL);
+        tcol.setLayoutParams(new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView title = new TextView(a);
+        title.setText("选择滤镜");
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17.5f);
+        title.setTextColor(MainActivity.C_TEXT_MAIN);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        tcol.addView(title);
+
+        TextView sub = new TextView(a);
+        sub.setText("传奇一瞬 · " + FILTERS.length + " 款");
+        sub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f);
+        sub.setTextColor(MainActivity.C_TEXT_SUB);
+        sub.setPadding(0, a.dp(2), 0, 0);
+        tcol.addView(sub);
+
+        titleRow.addView(tcol);
+
+        TextView cur = new TextView(a);
+        cur.setText("当前 " + nameOf(current));
+        cur.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        cur.setTextColor(MainActivity.C_ACCENT_DK);
+        cur.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        cur.setPadding(a.dp(11), a.dp(5), a.dp(11), a.dp(5));
+        GradientDrawable curBg = new GradientDrawable();
+        curBg.setColor(MainActivity.C_PINK_TINT);
+        curBg.setCornerRadius(a.dp(20));
+        cur.setBackground(curBg);
+        titleRow.addView(cur);
+
+        LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        titleLp.bottomMargin = a.dp(10);
+        root.addView(titleRow, titleLp);
+
+        // ---------- 滚动区 ----------
+        ScrollView sv = new ScrollView(a);
+        sv.setClipToPadding(false);
+        LinearLayout body = new LinearLayout(a);
+        body.setOrientation(LinearLayout.VERTICAL);
+        sv.addView(body);
+
+        int listH = (int) (a.getResources().getDisplayMetrics().heightPixels * 0.58f);
+        root.addView(sv, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, listH));
+
+        // ---------- 按分组构建卡片 ----------
+        int lastGroup = -1;
+        LinearLayout card = null;
+        int inGroupIdx = 0;
+        int groupCount = 0;
+
+        for (int i = 0; i < FILTERS.length; i++) {
+            final Object[] f = FILTERS[i];
+            final int id = ((Integer) f[0]).intValue();
+            String cn = (String) f[2];
+            int grp = ((Integer) f[3]).intValue();
+
+            if (grp != lastGroup) {
+                // 收尾上一个分组
+                card = null;
+                lastGroup = grp;
+                inGroupIdx = 0;
+
+                // 统计本组数量
+                groupCount = 0;
+                for (Object[] g : FILTERS) {
+                    if (((Integer) g[3]).intValue() == grp) groupCount++;
+                }
+
+                // 分组标题：竖条 + 文字
+                LinearLayout hRow = new LinearLayout(a);
+                hRow.setOrientation(LinearLayout.HORIZONTAL);
+                hRow.setGravity(Gravity.CENTER_VERTICAL);
+
+                View bar = new View(a);
+                GradientDrawable barBg = new GradientDrawable();
+                barBg.setColor(MainActivity.C_ACCENT);
+                barBg.setCornerRadius(a.dp(2));
+                bar.setBackground(barBg);
+                LinearLayout.LayoutParams barLp = new LinearLayout.LayoutParams(
+                        a.dp(3), a.dp(13));
+                barLp.rightMargin = a.dp(8);
+                hRow.addView(bar, barLp);
+
+                TextView h = new TextView(a);
+                h.setText(GROUPS[grp]);
+                h.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+                h.setTextColor(MainActivity.C_TEXT_SUB);
+                h.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+                hRow.addView(h);
+
+                LinearLayout.LayoutParams hLp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                hLp.topMargin = a.dp(12);
+                hLp.bottomMargin = a.dp(7);
+                hLp.leftMargin = a.dp(4);
+                body.addView(hRow, hLp);
+
+                // 新建组卡片
+                card = new LinearLayout(a);
+                card.setOrientation(LinearLayout.VERTICAL);
+                GradientDrawable cbg = new GradientDrawable();
+                cbg.setColor(0x8CFFFFFF);
+                cbg.setCornerRadius(a.dp(18));
+                cbg.setStroke(a.dp(1), 0xB0FFFFFF);
+                card.setBackground(cbg);
+                card.setClipToOutline(true);
+
+                LinearLayout.LayoutParams cLp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                cLp.bottomMargin = a.dp(4);
+                body.addView(card, cLp);
+            }
+
+            final boolean selected = id == current;
+
+            // ---------- 单行 ----------
+            LinearLayout row = new LinearLayout(a);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(a.dp(12), a.dp(10), a.dp(12), a.dp(10));
+
+            if (selected) {
+                GradientDrawable rowBg = new GradientDrawable();
+                rowBg.setCornerRadius(a.dp(14));
+                rowBg.setColor(MainActivity.C_PINK_TINT);
+                row.setBackground(rowBg);
+            }
+
+            // 色条
+            FrameLayout swWrap = new FrameLayout(a);
+            LinearLayout.LayoutParams swLp = new LinearLayout.LayoutParams(
+                    a.dp(52), a.dp(30));
+            swLp.rightMargin = a.dp(12);
+            swWrap.setLayoutParams(swLp);
+
+            View swatch = new View(a);
+            swatch.setBackground(gradient(
+                    ((Integer) f[4]).intValue(),
+                    ((Integer) f[5]).intValue(),
+                    ((Integer) f[6]).intValue()));
+            // 圆角裁剪
+            final int cr = a.dp(9);
+            swatch.setOutlineProvider(new android.view.ViewOutlineProvider() {
+                public void getOutline(View v, android.graphics.Outline o) {
+                    o.setRoundRect(0, 0, v.getWidth(), v.getHeight(), cr);
+                }
+            });
+            swatch.setClipToOutline(true);
+            swWrap.addView(swatch, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+            // 选中描边环
+            if (selected) {
+                View ring = new View(a);
+                GradientDrawable ringBg = new GradientDrawable();
+                ringBg.setColor(0x00000000);
+                ringBg.setCornerRadius(a.dp(9));
+                ringBg.setStroke(a.dp(2), MainActivity.C_ACCENT);
+                ring.setBackground(ringBg);
+                swWrap.addView(ring, new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            }
+
+            // 光泽：顶部一条白色半透明
+            View gloss = new View(a);
+            GradientDrawable glossBg = new GradientDrawable(
+                    GradientDrawable.Orientation.TOP_BOTTOM,
+                    new int[]{0x33FFFFFF, 0x00FFFFFF});
+            gloss.setBackground(glossBg);
+            gloss.setOutlineProvider(new android.view.ViewOutlineProvider() {
+                public void getOutline(View v, android.graphics.Outline o) {
+                    o.setRoundRect(0, 0, v.getWidth(), v.getHeight(), cr);
+                }
+            });
+            gloss.setClipToOutline(true);
+            swWrap.addView(gloss, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+            row.addView(swWrap);
+
+            // 文字
+            LinearLayout col = new LinearLayout(a);
+            col.setOrientation(LinearLayout.VERTICAL);
+            col.setLayoutParams(new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+            TextView t = new TextView(a);
+            t.setText(cn);
+            t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+            t.setTextColor(selected ? MainActivity.C_ACCENT_DK : MainActivity.C_TEXT_MAIN);
+            if (selected) {
+                t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            }
+            col.addView(t);
+
+            TextView d = new TextView(a);
+            d.setText((String) f[7]);
+            d.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+            d.setTextColor(MainActivity.C_TEXT_SUB);
+            d.setPadding(0, a.dp(2), 0, 0);
+            d.setMaxLines(1);
+            d.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            col.addView(d);
+
+            row.addView(col);
+
+            if (selected) {
+                TextView tick = new TextView(a);
+                tick.setText("✓");
+                tick.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+                tick.setTextColor(MainActivity.C_ACCENT);
+                tick.setTypeface(Typeface.DEFAULT_BOLD);
+                tick.setPadding(a.dp(6), 0, a.dp(2), 0);
+                row.addView(tick);
+            }
+
+            row.setClickable(true);
+            row.setOnTouchListener(new View.OnTouchListener() {
+                public boolean onTouch(View v, android.view.MotionEvent e) {
+                    if (e.getActionMasked() == android.view.MotionEvent.ACTION_DOWN) {
+                        v.animate().scaleX(0.985f).scaleY(0.985f).setDuration(80).start();
+                    } else if (e.getActionMasked() == android.view.MotionEvent.ACTION_UP
+                            || e.getActionMasked() == android.view.MotionEvent.ACTION_CANCEL) {
+                        v.animate().scaleX(1f).scaleY(1f).setDuration(120).start();
+                    }
+                    return false;
+                }
+            });
+            row.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    a.writeConfig(key, String.valueOf(id));
+                    dlg.dismiss();
+                    a.refreshCurrentPage();
+                }
+            });
+
+            card.addView(row, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+            inGroupIdx++;
+
+            // 组内分隔线（最后一行不加）
+            if (inGroupIdx < groupCount) {
+                View line = new View(a);
+                line.setBackgroundColor(0x0C000000);
+                LinearLayout.LayoutParams lp2 = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, a.dp(1));
+                lp2.leftMargin = a.dp(76);
+                lp2.rightMargin = a.dp(12);
+                card.addView(line, lp2);
+            }
+        }
+
+        // ---------- 按钮 ----------
+        LinearLayout btnRow = new LinearLayout(a);
+        btnRow.setOrientation(LinearLayout.HORIZONTAL);
+        btnRow.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams btnLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        btnLp.topMargin = a.dp(12);
+
+        final int defId = defaultOf(key);
+        if (defId > 0) {
+            btnRow.addView(makeBtn(a, "恢复默认", new View.OnClickListener() {
+                public void onClick(View v) {
+                    a.writeConfig(key, String.valueOf(defId));
+                    dlg.dismiss();
+                    a.refreshCurrentPage();
+                }
+            }));
+        }
+        btnRow.addView(makeBtn(a, "取消", new View.OnClickListener() {
+            public void onClick(View v) { dlg.dismiss(); }
+        }));
+
+        root.addView(btnRow, btnLp);
+
+        dlg.setContentView(root);
+
+        android.view.Window w = dlg.getWindow();
+        if (w != null) {
+            w.setBackgroundDrawableResource(android.R.color.transparent);
+            w.addFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            android.view.WindowManager.LayoutParams lp = w.getAttributes();
+            lp.dimAmount = 0.45f;
+            w.setAttributes(lp);
+            int width = (int) (a.getResources().getDisplayMetrics().widthPixels * 0.92f);
+            w.setLayout(width, ViewGroup.LayoutParams.WRAP_CONTENT);
+        }
+
+        dlg.show();
+    }
+
+    private static View makeBtn(final MainActivity a, String text, View.OnClickListener l) {
+        TextView b = new TextView(a);
+        b.setText(text);
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14.5f);
+        b.setGravity(Gravity.CENTER);
+        b.setIncludeFontPadding(false);
+        b.setPadding(a.dp(18), a.dp(10), a.dp(18), a.dp(10));
+        b.setTextColor(0xFF4A4652);
+
+        GradientDrawable bg = new GradientDrawable();
+        bg.setCornerRadius(a.dp(15));
+        bg.setColor(0xFFF1EFF2);
+        b.setBackground(bg);
+
+        b.setOnTouchListener(new View.OnTouchListener() {
+            public boolean onTouch(View v, android.view.MotionEvent e) {
+                if (e.getActionMasked() == android.view.MotionEvent.ACTION_DOWN) {
+                    v.animate().scaleX(0.94f).scaleY(0.94f).setDuration(90).start();
+                } else if (e.getActionMasked() == android.view.MotionEvent.ACTION_UP
+                        || e.getActionMasked() == android.view.MotionEvent.ACTION_CANCEL) {
+                    v.animate().scaleX(1f).scaleY(1f).setDuration(120).start();
+                }
+                return false;
+            }
+        });
+        b.setOnClickListener(l);
+
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.leftMargin = a.dp(8);
+        b.setLayoutParams(lp);
+        return b;
+    }
+}

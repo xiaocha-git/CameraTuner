@@ -1,0 +1,443 @@
+package com.starlight.cameratuner;
+
+import android.content.Context;
+import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
+import android.os.Handler;
+import android.os.Looper;
+import android.util.TypedValue;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+
+import java.lang.reflect.Method;
+
+import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.XposedBridge;
+import de.robv.android.xposed.XposedHelpers;
+import de.robv.android.xposed.callbacks.XC_LoadPackage;
+
+/**
+ * 移轴（Tilt Shift）悬浮开关
+ *
+ * 背景：18 相机包里移轴功能完整保留，但官方把入口开关删了（菜单项 0xe4 被
+ *       F.k0() 挡住，因为 pref_camera_tilt_shift_mode 默认 false）。
+ *
+ * 做法：
+ *   1. hook K2.b.b0() -> false，绕过机型限制门
+ *   2. 往相机窗口里塞一个悬浮开关（无需 SYSTEM_ALERT_WINDOW）
+ *   3. 点击时翻转 pref_camera_tilt_shift_mode，并调用 onTiltShiftSwitched 真正触发切换
+ *
+ * 关键链路（已从 smali 确认）：
+ *   读：Xh.a.h("pref_camera_tilt_shift_mode", false)
+ *   写：Xh.a.n("pref_camera_tilt_shift_mode", boolean)
+ *   生效：Camera2Module.onTiltShiftSwitched(boolean)
+ *
+ * 配置：tilt.switch=1
+ */
+public class TiltSwitch {
+
+    private static final String TAG = "[tilt]";
+    private static final String PREF_KEY = "pref_camera_tilt_shift_mode";
+    private static final String PREF_CLASS = "Xh.a";
+
+    /** 当前 Camera2Module 实例（由 onTiltShiftSwitched hook 缓存） */
+    private static volatile Object sModule = null;
+
+    /** 悬浮视图 */
+    private static View sRoot = null;
+    private static View sDot = null;
+    private static TextView sLabel = null;
+    private static boolean sAttached = false;
+
+    private static final Handler UI = new Handler(Looper.getMainLooper());
+
+    private static ClassLoader sCl = null;
+    private static boolean sEnabled = false;
+
+    private static final int COLOR_ON = 0xFF34C759;    // 绿
+    private static final int COLOR_OFF = 0xFF8E8E93;   // 灰
+
+    // ==================== 入口 ====================
+
+    public static void init(XC_LoadPackage.LoadPackageParam lp, boolean enabled) {
+        if (!enabled) {
+            log("tilt.switch=0，跳过");
+            return;
+        }
+        sEnabled = true;
+        sCl = lp.classLoader;
+
+        hookBypassGate(lp.classLoader);
+        hookCacheModule(lp.classLoader);
+        hookActivity(lp.classLoader);
+
+        log("移轴开关已启用");
+    }
+
+    // ==================== 1. 绕过 K2.b.b0() 机型限制 ====================
+
+    private static void hookBypassGate(ClassLoader cl) {
+        try {
+            Class<?> c = XposedHelpers.findClassIfExists("K2.b", cl);
+            if (c == null) {
+                log("找不到 K2.b");
+                return;
+            }
+            int n = 0;
+            for (final Method m : c.getDeclaredMethods()) {
+                if (!"b0".equals(m.getName())) continue;
+                if (m.getReturnType() != boolean.class) continue;
+                if (m.getParameterTypes().length != 0) continue;
+
+                XposedBridge.hookMethod(m, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        Object old = param.getResult();
+                        if (Boolean.TRUE.equals(old)) {
+                            param.setResult(false);
+                            log("K2.b.b0(): true -> false（放行移轴）");
+                        }
+                    }
+                });
+                n++;
+            }
+            log(n > 0 ? ("已 hook K2.b.b0()，共 " + n + " 个") : "K2.b.b0() 未找到");
+        } catch (Throwable t) {
+            log("hook K2.b 失败: " + t);
+        }
+    }
+
+    // ==================== 2. 缓存 Camera2Module 实例 ====================
+
+    private static void hookCacheModule(ClassLoader cl) {
+        try {
+            Class<?> c = XposedHelpers.findClassIfExists(
+                    "com.android.camera.module.Camera2Module", cl);
+            if (c == null) {
+                log("找不到 Camera2Module");
+                return;
+            }
+            int n = 0;
+            for (final Method m : c.getDeclaredMethods()) {
+                if (!"onTiltShiftSwitched".equals(m.getName())) continue;
+                if (m.getParameterTypes().length != 1) continue;
+
+                XposedBridge.hookMethod(m, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (param.thisObject != null) {
+                            sModule = param.thisObject;
+                        }
+                    }
+                });
+                n++;
+            }
+            log(n > 0 ? ("已 hook onTiltShiftSwitched 缓存实例，共 " + n + " 个")
+                    : "onTiltShiftSwitched 未找到");
+        } catch (Throwable t) {
+            log("hook onTiltShiftSwitched 失败: " + t);
+        }
+    }
+
+    // ==================== 3. 挂 Activity 生命周期 ====================
+
+    private static void hookActivity(ClassLoader cl) {
+        try {
+            Class<?> act = XposedHelpers.findClassIfExists(
+                    "android.app.Activity", cl);
+            if (act == null) {
+                log("找不到 Activity");
+                return;
+            }
+
+            // onResume：首次时添加视图，之后显示
+            XposedHelpers.findAndHookMethod(act, "onResume", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    try {
+                        Object a = param.thisObject;
+                        if (a == null) return;
+                        String cn = a.getClass().getName();
+                        if (!cn.startsWith("com.android.camera")) return;
+
+                        if (!sAttached) {
+                            attach((android.app.Activity) a);
+                        } else {
+                            show(true);
+                        }
+                        refreshUI();
+                    } catch (Throwable t) {
+                        log("onResume 处理失败: " + t);
+                    }
+                }
+            });
+
+            // onPause：隐藏（不用 remove，避免相机重建后状态混乱）
+            XposedHelpers.findAndHookMethod(act, "onPause", new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    try {
+                        Object a = param.thisObject;
+                        if (a == null) return;
+                        if (!a.getClass().getName().startsWith("com.android.camera")) return;
+                        show(false);
+                    } catch (Throwable t) {
+                        log("onPause 处理失败: " + t);
+                    }
+                }
+            });
+
+            log("已 hook Activity 生命周期");
+        } catch (Throwable t) {
+            log("hook Activity 失败: " + t);
+        }
+    }
+
+    // ==================== 视图构建 ====================
+
+    private static void attach(final android.app.Activity act) {
+        try {
+            ViewGroup decor = (ViewGroup) act.getWindow().getDecorView();
+            if (decor == null) {
+                log("decorView 为 null");
+                return;
+            }
+
+            Context ctx = act;
+
+            // 外层容器：wrap_content，只包裹内容，不拦截其他地方
+            FrameLayout outer = new FrameLayout(ctx);
+            outer.setClipChildren(false);
+
+            // 内容：横向排列 [圆点][文字]
+            LinearLayout row = new LinearLayout(ctx);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(dp(ctx, 10), dp(ctx, 6), dp(ctx, 12), dp(ctx, 6));
+
+            // 半透明黑底，圆角
+            GradientDrawable bg = new GradientDrawable();
+            bg.setColor(0x99000000);
+            bg.setCornerRadius(dp(ctx, 14));
+            row.setBackground(bg);
+
+            // 小圆点
+            View dot = new View(ctx);
+            LinearLayout.LayoutParams dotLp = new LinearLayout.LayoutParams(
+                    dp(ctx, 10), dp(ctx, 10));
+            dotLp.rightMargin = dp(ctx, 7);
+            dot.setLayoutParams(dotLp);
+            GradientDrawable dotBg = new GradientDrawable();
+            dotBg.setShape(GradientDrawable.OVAL);
+            dotBg.setColor(COLOR_OFF);
+            dot.setBackground(dotBg);
+
+            // 文字
+            TextView label = new TextView(ctx);
+            label.setText("移轴：关");
+            label.setTextColor(0xFFFFFFFF);
+            label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+            label.setIncludeFontPadding(false);
+
+            row.addView(dot);
+            row.addView(label);
+
+            outer.addView(row, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT));
+
+            // 只有这块可点击
+            outer.setClickable(true);
+            outer.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    toggle();
+                }
+            });
+
+            // 定位：左上角，顶栏下方
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.gravity = Gravity.TOP | Gravity.START;
+            lp.leftMargin = dp(ctx, 16);
+            lp.topMargin = dp(ctx, 110);   // 顶栏下方
+
+            decor.addView(outer, lp);
+
+            sRoot = outer;
+            sDot = dot;
+            sLabel = label;
+            sAttached = true;
+
+            log("悬浮开关已添加");
+        } catch (Throwable t) {
+            log("添加视图失败: " + t);
+        }
+    }
+
+    private static void show(boolean visible) {
+        if (sRoot == null) return;
+        try {
+            sRoot.setVisibility(visible ? View.VISIBLE : View.GONE);
+        } catch (Throwable ignored) {}
+    }
+
+    private static void refreshUI() {
+        final boolean on = readPref();
+        UI.post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (sLabel != null) {
+                        sLabel.setText(on ? "移轴：开" : "移轴：关");
+                    }
+                    if (sDot != null) {
+                        GradientDrawable g = new GradientDrawable();
+                        g.setShape(GradientDrawable.OVAL);
+                        g.setColor(on ? COLOR_ON : COLOR_OFF);
+                        sDot.setBackground(g);
+                    }
+                } catch (Throwable ignored) {}
+            }
+        });
+    }
+
+    // ==================== 开关逻辑 ====================
+
+    private static void toggle() {
+        try {
+            boolean cur = readPref();
+            boolean next = !cur;
+
+            writePref(next);
+
+            // 真正触发效果切换
+            callOnTiltShiftSwitched(next);
+
+            refreshUI();
+            log("移轴: " + cur + " -> " + next);
+        } catch (Throwable t) {
+            log("切换失败: " + t);
+        }
+    }
+
+    /** 读 pref_camera_tilt_shift_mode */
+    private static boolean readPref() {
+        try {
+            // 优先用 ComponentRunningTiltValue.isSwitchOn(int)
+            Class<?> crt = XposedHelpers.findClassIfExists(
+                    "com.android.camera.data.data.runing.ComponentRunningTiltValue", sCl);
+            if (crt != null) {
+                Object data = getDataItem();
+                if (data != null) {
+                    Object r = XposedHelpers.callMethod(data, "isSwitchOn", 163);
+                    if (r instanceof Boolean) return (Boolean) r;
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        // 兜底：直接读 Xh.a
+        try {
+            Object data = getDataItem();
+            if (data != null) {
+                Object r = XposedHelpers.callMethod(data, "h", PREF_KEY, false);
+                if (r instanceof Boolean) return (Boolean) r;
+            }
+        } catch (Throwable t) {
+            log("读 pref 失败: " + t);
+        }
+        return false;
+    }
+
+    /** 写 pref_camera_tilt_shift_mode */
+    private static void writePref(boolean v) {
+        try {
+            Class<?> crt = XposedHelpers.findClassIfExists(
+                    "com.android.camera.data.data.runing.ComponentRunningTiltValue", sCl);
+            if (crt != null) {
+                Object data = getDataItem();
+                if (data != null) {
+                    XposedHelpers.callMethod(data, "toSwitch", 163, v);
+                    return;
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        try {
+            Object data = getDataItem();
+            if (data != null) {
+                XposedHelpers.callMethod(data, "n", PREF_KEY, v);
+            }
+        } catch (Throwable t) {
+            log("写 pref 失败: " + t);
+        }
+    }
+
+    /** 取 DataItem（Xh.a 实例），通过 g2.a.j() 拿 v2.H0 再取 */
+    private static Object getDataItem() {
+        try {
+            Class<?> ga = XposedHelpers.findClassIfExists("g2.a", sCl);
+            if (ga == null) return null;
+            Object h0 = XposedHelpers.callStaticMethod(ga, "j");
+            if (h0 == null) return null;
+            // v2.H0 本身继承自 Xh.a
+            if (isInstanceOfXha(h0)) return h0;
+            // 否则尝试 getDataItem()
+            try {
+                return XposedHelpers.callMethod(h0, "getDataItem");
+            } catch (Throwable ignored) {}
+            return null;
+        } catch (Throwable t) {
+            log("取 DataItem 失败: " + t);
+            return null;
+        }
+    }
+
+    private static boolean isInstanceOfXha(Object o) {
+        Class<?> c = o.getClass();
+        while (c != null) {
+            if ("Xh.a".equals(c.getName())) return true;
+            c = c.getSuperclass();
+        }
+        return false;
+    }
+
+    /** 调用 Camera2Module.onTiltShiftSwitched(boolean)，并重启预览让移轴进入渲染管线 */
+    private static void callOnTiltShiftSwitched(final boolean on) {
+        Object m = sModule;
+        if (m == null) {
+            log("模块实例未就绪，跳过 onTiltShiftSwitched（下次进拍照模式后可点）");
+            return;
+        }
+        try {
+            XposedHelpers.callMethod(m, "onTiltShiftSwitched", on);
+            log("已调用 onTiltShiftSwitched(" + on + ")");
+        } catch (Throwable t) {
+            log("调用 onTiltShiftSwitched 失败: " + t);
+        }
+
+        // 关键：必须重建预览，移轴才会真正进入渲染管线
+        // 否则要手动切一次模式才生效
+        try {
+            XposedHelpers.callMethod(m, "restartPreview");
+            log("已调用 restartPreview()");
+        } catch (Throwable t) {
+            log("restartPreview 失败: " + t);
+        }
+    }
+
+    // ==================== 工具 ====================
+
+    private static int dp(Context ctx, int v) {
+        return (int) (v * ctx.getResources().getDisplayMetrics().density + 0.5f);
+    }
+
+    private static void log(String msg) {
+        XposedBridge.log(TAG + " " + msg);
+    }
+}

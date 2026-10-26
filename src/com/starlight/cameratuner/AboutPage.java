@@ -25,12 +25,13 @@ public class AboutPage {
 
     ScrollView build() {
         ScrollView sv = new ScrollView(a);
-        sv.setBackgroundColor(MainActivity.C_BG);
+        Ui.customScrollbar(a, sv);
+        sv.setBackgroundColor(0x00000000);
         sv.setClipToPadding(false);
 
         LinearLayout c = new LinearLayout(a);
         c.setOrientation(LinearLayout.VERTICAL);
-        c.setPadding(a.dp(16), a.dp(8), a.dp(16), a.dp(150));
+        c.setPadding(a.dp(16), a.getStatusBarHeight() + a.dp(8), a.dp(16), a.dp(110));
 
         c.addView(Ui.pageTitle(a, "关于"));
 
@@ -184,6 +185,10 @@ public class AboutPage {
         Ui.clickRow(a, card5, "模块日志", "查看最近的 CameraTuner 日志", new Runnable() {
             public void run() { showLog(); }
         });
+        Ui.divider(a, card5);
+        Ui.clickRow(a, card5, "日志过滤", "只输出选中的日志标签，留空则全部输出", new Runnable() {
+            public void run() { showLogFilterDialog(); }
+        });
         c.addView(card5);
 
         // ===== 版权 =====
@@ -283,10 +288,10 @@ public class AboutPage {
     private void editConfig() {
         final String content = readConf();
         if (content == null) {
-            new android.app.AlertDialog.Builder(a)
-                    .setTitle("配置文件不存在")
-                    .setMessage("配置文件尚未生成。\n启动一次相机后会自动创建。")
-                    .setPositiveButton("知道了", null)
+            TunerDialog.create(a)
+                    .title("配置文件不存在")
+                    .message("配置文件尚未生成。\n启动一次相机后会自动创建。")
+                    .positive("知道了", null)
                     .show();
             return;
         }
@@ -319,6 +324,7 @@ public class AboutPage {
         TunerDialog td = TunerDialog.create(a)
                 .title("编辑 config.conf")
                 .editable(content)
+                .negative("取消", null)
                 .neutral("复制", new TunerDialog.OnAction() {
                     public void onClick(TunerDialog d) {
                         try {
@@ -352,15 +358,27 @@ public class AboutPage {
             Toast.makeText(a, "目录不存在且创建失败", Toast.LENGTH_SHORT).show();
             return;
         }
-        // 尝试用系统文件管理器打开目录
+        // 尝试用系统文件管理器直接打开 CameraTuner 目录
+        // 用 EXTERNAL_STORAGE_PROVIDER 的 tree/document URI，落到 primary:CameraTuner
+        // 而不是 primary 根目录，避免用户还要自己一层层点进去
         boolean opened = false;
-        try {
-            Intent i = new Intent(Intent.ACTION_VIEW);
-            i.setDataAndType(Uri.parse("content://com.android.externalstorage.documents/root/primary"),
-                    "vnd.android.document/root");
-            a.startActivity(i);
-            opened = true;
-        } catch (Throwable ignored) {}
+        String[][] candidates = new String[][] {
+                {"content://com.android.externalstorage.documents/document/primary%3ACameraTuner",
+                        "vnd.android.document/directory"},
+                {"content://com.android.externalstorage.documents/tree/primary%3ACameraTuner",
+                        "vnd.android.document/directory"},
+                {"content://com.android.externalstorage.documents/root/primary",
+                        "vnd.android.document/root"}
+        };
+        for (String[] c : candidates) {
+            if (opened) break;
+            try {
+                Intent i = new Intent(Intent.ACTION_VIEW);
+                i.setDataAndType(Uri.parse(c[0]), c[1]);
+                a.startActivity(i);
+                opened = true;
+            } catch (Throwable ignored) {}
+        }
         if (!opened) {
             Toast.makeText(a, "路径：" + MainActivity.CONF_DIR, Toast.LENGTH_LONG).show();
         }
@@ -450,7 +468,36 @@ public class AboutPage {
 
     /** 本地兜底更新日志 */
     private static final String LOCAL_CHANGELOG =
-            "v1.7\n"
+            "v1.9\n"
+          + "1. 新增 更多机型适配（目前 11 款）\n"
+          + "2. 优化 滚动流畅度，修复部分场景卡顿\n"
+          + "3. 优化 页面、导航栏、弹窗全部重构\n"
+          + "4. 优化 适配全面屏界面\n"
+          + "5. 修复 调色盘原图成片无法生效\n"
+          + "6. 修复 手动滑动页面时导航栏胶囊不跟随\n"
+          + "7. 修复 修改配置保存后页面跳回顶部\n"
+          + "8. 修复 从后台回到应用时跳回状态页\n"
+          + "9. 修复 竖向滚动列表时误触发翻页\n"
+          + "10. 修复 部分提示弹窗多出一个「取消」按钮\n"
+          + "\n"
+          + "本次更新改动较大，如不生效建议重建配置文件\n"
+          + "\n"
+          + "v1.8\n"
+          + "1. 新增移轴开关，相机左上角悬浮控制（圆形/平行）\n"
+          + "2. 新增超级长焦和实况可以同时开启\n"
+          + "3. 新增模块内日志过滤，按标签筛选输出\n"
+          + "4. 新增模块内功能开关（移轴 / AI长焦实况）\n"
+          + "5. 新增模块配置文件自动补齐（带分组与说明）\n"
+          + "6. 新增模块配置路径统一\n"
+          + "7. 修复相机轮盘内快捷焦段异常\n"
+          + "8. 修复录像模式快捷焦段异常\n"
+          + "9. 修复模块内编辑配置文件窗口异常\n"
+          + "10. 修复模块打开配置文件路径异常\n"
+          + "11. 修复模块配置文件分割线异常\n"
+          + "\n"
+          + "新增功能默认关闭，可在「核心功能」里按需开启\n"
+          + "\n"
+          + "v1.7\n"
           + "1. 新增智能构图修复，AI帮拍里的智能构图按钮可以用了\n"
           + "2. 新增传奇一瞬色彩模拟，让传奇一瞬正常出片\n"
           + "3. 新增 42 个滤镜可选，带渐变色条与效果说明\n"
@@ -710,6 +757,159 @@ public class AboutPage {
         }
     }
 
+    /** 日志标签多选对话框 */
+    /** 复选框样式：选中玫红填充 + 白勾，未选中描边空框 */
+    private void applyBoxStyle(MainActivity a, TextView box, boolean on) {
+        android.graphics.drawable.GradientDrawable bg =
+                new android.graphics.drawable.GradientDrawable();
+        bg.setCornerRadius(a.dp(7));
+        if (on) {
+            bg.setColor(MainActivity.C_ACCENT);
+            box.setText("✓");
+        } else {
+            bg.setColor(0x00000000);
+            bg.setStroke((int) (a.dp(1) * 1.5f), 0x33000000);
+            box.setText("");
+        }
+        box.setBackground(bg);
+    }
+
+    private void showLogFilterDialog() {
+        final String[] TAGS = {
+                "tilt", "zoom", "cycle", "telefix", "caps", "cvtype",
+                "aiwm", "og", "raw", "rawfield", "rawsize", "opmode",
+                "mode", "blockmsg", "wm", "level"
+        };
+        final String[] LABELS = {
+                "tilt —— 移轴开关",
+                "zoom —— 焦段重映射",
+                "cycle —— 档位循环修正",
+                "telefix —— 专业模式长焦修复（刷屏严重）",
+                "caps —— 传奇一瞬能力门",
+                "cvtype —— 原色风格",
+                "aiwm —— AI水印",
+                "og —— 片门全开",
+                "raw —— RAW 回调类型",
+                "rawfield —— RAW 字段强制",
+                "rawsize —— RAW 尺寸补齐",
+                "opmode —— 强制 operation mode",
+                "mode —— 模式可见性",
+                "blockmsg —— 拦截退出消息",
+                "wm —— 自定义水印机型",
+                "level —— 传奇设备等级"
+        };
+
+        java.util.Map<String, String> conf = a.readConfig();
+        String cur = conf.get("log.filter");
+        final boolean[] checked = new boolean[TAGS.length];
+        if (cur != null && !cur.trim().isEmpty()) {
+            for (String t : cur.split(",")) {
+                String tt = t.trim();
+                for (int i = 0; i < TAGS.length; i++) {
+                    if (TAGS[i].equals(tt)) checked[i] = true;
+                }
+            }
+        }
+
+        // ---------- 自绘多选列表 ----------
+        final TextView[] boxes = new TextView[TAGS.length];
+        LinearLayout list = new LinearLayout(a);
+        list.setOrientation(LinearLayout.VERTICAL);
+
+        for (int i = 0; i < TAGS.length; i++) {
+            final int idx = i;
+
+            LinearLayout row = new LinearLayout(a);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(a.dp(4), a.dp(9), a.dp(4), a.dp(9));
+
+            TextView label = new TextView(a);
+            label.setText(LABELS[i]);
+            label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f);
+            label.setTextColor(MainActivity.C_TEXT_MAIN);
+            label.setLayoutParams(new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            row.addView(label);
+
+            final TextView box = new TextView(a);
+            box.setGravity(Gravity.CENTER);
+            box.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+            box.setTextColor(0xFFFFFFFF);
+            box.setTypeface(Typeface.DEFAULT_BOLD);
+            box.setIncludeFontPadding(false);
+            LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(a.dp(22), a.dp(22));
+            bp.leftMargin = a.dp(10);
+            box.setLayoutParams(bp);
+            applyBoxStyle(a, box, checked[i]);
+            boxes[i] = box;
+            row.addView(box);
+
+            row.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    checked[idx] = !checked[idx];
+                    applyBoxStyle(a, boxes[idx], checked[idx]);
+                }
+            });
+            list.addView(row);
+
+            if (i < TAGS.length - 1) {
+                View line = new View(a);
+                line.setBackgroundColor(0x0C000000);
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, a.dp(1));
+                lp.leftMargin = a.dp(4);
+                lp.rightMargin = a.dp(4);
+                list.addView(line, lp);
+            }
+        }
+
+        ScrollView lsv = new ScrollView(a);
+        Ui.customScrollbar(a, lsv);
+        lsv.setClipToPadding(false);
+        lsv.addView(list);
+        int lh = (int) (a.getResources().getDisplayMetrics().heightPixels * 0.5f);
+        lsv.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, lh));
+
+        TunerDialog.create(a)
+                .title("日志过滤")
+                .customView(lsv)
+                .neutral("全选", new TunerDialog.OnAction() {
+                    public void onClick(TunerDialog d) {
+                        StringBuilder sb = new StringBuilder();
+                        for (String t : TAGS) {
+                            if (sb.length() > 0) sb.append(",");
+                            sb.append(t);
+                        }
+                        a.writeConfig("log.filter", sb.toString());
+                        Toast.makeText(a, "已全选，重启相机后生效", Toast.LENGTH_LONG).show();
+                    }
+                })
+                .negative("清空", new TunerDialog.OnAction() {
+                    public void onClick(TunerDialog d) {
+                        a.writeConfig("log.filter", "");
+                        Toast.makeText(a, "已清空（全部输出）", Toast.LENGTH_LONG).show();
+                    }
+                })
+                .positive("保存", new TunerDialog.OnAction() {
+                    public void onClick(TunerDialog d) {
+                        StringBuilder sb = new StringBuilder();
+                        for (int i = 0; i < TAGS.length; i++) {
+                            if (checked[i]) {
+                                if (sb.length() > 0) sb.append(",");
+                                sb.append(TAGS[i]);
+                            }
+                        }
+                        a.writeConfig("log.filter", sb.toString());
+                        Toast.makeText(a,
+                                sb.length() == 0 ? "已清空（全部输出）" : "已保存，重启相机后生效",
+                                Toast.LENGTH_LONG).show();
+                    }
+                })
+                .show();
+    }
+
     private void showLog() {
         final StringBuilder sb = new StringBuilder();
         try {
@@ -722,8 +922,44 @@ public class AboutPage {
         } catch (Throwable t) {
             sb.append("读取失败：").append(t);
         }
-        TunerDialog.create(a).title("模块日志")
-                .message(sb.length() == 0 ? "暂无日志" : sb.toString())
-                .positive("关闭", null).show();
+        final String logText = sb.length() == 0 ? "暂无日志" : sb.toString();
+
+        // 只读日志框，限高 55% 屏高，框内滚动
+        TextView tv = new TextView(a);
+        tv.setText(logText);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        tv.setTextColor(MainActivity.C_TEXT_MAIN);
+        tv.setTypeface(Typeface.MONOSPACE);
+        tv.setTextIsSelectable(true);
+        tv.setLineSpacing(a.dp(2), 1f);
+
+        int maxH = (int) (a.getResources().getDisplayMetrics().heightPixels * 0.55f);
+
+        ScrollView sv = new ScrollView(a);
+        Ui.customScrollbar(a, sv);
+        sv.setPadding(a.dp(16), a.dp(8), a.dp(16), a.dp(4));
+        sv.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, maxH));
+        sv.addView(tv, new android.widget.FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        TunerDialog.create(a)
+                .title("模块日志")
+                .customView(sv)
+                .neutral("复制", new TunerDialog.OnAction() {
+                    public void onClick(TunerDialog d) {
+                        try {
+                            android.content.ClipboardManager cm =
+                                    (android.content.ClipboardManager) a.getSystemService(Context.CLIPBOARD_SERVICE);
+                            cm.setPrimaryClip(ClipData.newPlainText("CameraTuner log", logText));
+                            Toast.makeText(a, "已复制", Toast.LENGTH_SHORT).show();
+                        } catch (Throwable t) {
+                            Toast.makeText(a, "复制失败：" + t, Toast.LENGTH_SHORT).show();
+                        }
+                    }
+                })
+                .positive("关闭", null)
+                .show();
     }
 }

@@ -41,18 +41,28 @@ import java.util.Map;
 
 public class MainActivity extends Activity {
 
-    static final String CONF_DIR = "/sdcard/CameraTuner";
+    static final String CONF_DIR = "/storage/emulated/0/CameraTuner";
     static final String CONF_PATH = CONF_DIR + "/config.conf";
     static final String CAMERA_PKG = "com.android.camera";
     static final String EXPECTED_VERSION = "6.8.002090.2";
     static final String AUTHOR_KA_URL = "https://www.coolapk.com/u/16215423";
 
-    static final int C_BG        = 0xFFF2F2F7;
-    static final int C_CARD      = 0xFFFFFFFF;
-    static final int C_TEXT_MAIN = 0xFF1C1C1E;
-    static final int C_TEXT_SUB  = 0xFF8E8E93;
-    static final int C_ACCENT    = 0xFFE8A33D;
+    // ===== 配色：粉色系 · 2026-10-26 改版 =====
+    static final int C_BG        = 0xFFFFF6F9; // 背景兜底色（实际由 GlassBackground 绘制）
+    static final int C_CARD      = 0xE6FFFFFF; // 卡片：90% 白（下一步骤再降到 62% 玻璃）#修改
+    static final int C_TEXT_MAIN = 0xFF1C1C1E; // 主文字
+    static final int C_TEXT_SUB  = 0xFF8E8A94; // 次要文字（偏紫的灰）
+    static final int C_ACCENT    = 0xFFE0567C; // 主强调色：玫红
+    static final int C_ACCENT_DK = 0xFFC94268; // 强调色深版（文字用）
+    static final int C_ICON_IDLE = 0xFFA9A4B0; // 图标默认色（中性灰紫）
+    static final int C_PINK_SOFT = 0xFFFFE8EF; // 浅粉（选中胶囊底）
+    static final int C_PINK_TINT = 0x1FE0567C; // 12% 玫红（标签底）
+    static final int C_GLASS     = 0x85FFFFFF; // 玻璃卡片（52% 白）
+    static final int C_GLASS_HI  = 0xD9FFFFFF; // 高亮玻璃（85% 白）
+    static final int C_GLASS_EDGE= 0xD9FFFFFF; // 玻璃描边
+    static final int C_DIVIDER   = 0x0C000000; // 分隔线（4.7% 黑）
     static final int C_GREEN     = 0xFF34C759;
+    static final int C_ORANGE    = 0xFFFF9F0A; // 警示橙（只用于风险提示）
     static final int C_RED       = 0xFFFF3B30;
 
     static final String[][] MODE_PRESETS = {
@@ -74,8 +84,9 @@ public class MainActivity extends Activity {
     };
 
     SwipePager pager;
+    GlassNavView navBar;
+    boolean drivingPager = false;
     LinearLayout[] navItems = new LinearLayout[3];
-    View navIndicator;
     ImageView[] navIcons = new ImageView[3];
     TextView[] navLabels = new TextView[3];
     ScrollView[] pages = new ScrollView[3];
@@ -87,9 +98,28 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // 状态栏/导航栏透明，让渐变背景透上去
+        getWindow().setBackgroundDrawable(null);
+        // 内容延伸到状态栏 / 导航栏下面（解决上下白条）
+        if (Build.VERSION.SDK_INT >= 30) {
+            getWindow().setDecorFitsSystemWindows(false);
+        } else {
+            getWindow().getDecorView().setSystemUiVisibility(
+                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                    | View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
+        }
         getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
-        getWindow().setStatusBarColor(C_BG);
-        getWindow().setNavigationBarColor(C_BG);
+        if (Build.VERSION.SDK_INT >= 21) {
+            getWindow().setStatusBarColor(0x00000000);
+            getWindow().setNavigationBarColor(0x00000000);
+        }
+        // 浅色背景 → 状态栏图标用深色
+        try {
+            getWindow().getDecorView().setSystemUiVisibility(
+                    View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
+        } catch (Throwable ignored) {}
         buildUi();
         switchTab(0, false);
         requestStoragePermissionIfNeeded();
@@ -99,101 +129,165 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        // 记住当前页的滚动位置，重建后恢复。
+        // 否则切到后台再回来会跳回页面顶部，像是"重新打开了"。
+        final int savedY = pages[currentTab] != null ? pages[currentTab].getScrollY() : 0;
+
         rebuildPages();
-        pager.setCurrentItem(currentTab, false);
+
+        // 只在确实不在目标页时才切页。避免初始化阶段无谓的 setCurrentItem
+        // 把用户刚滑到的页面拉回去。
+        int w = pager.getWidth();
+        boolean needJump = true;
+        if (w > 0) {
+            int cur = Math.round((float) pager.getScrollX() / w);
+            needJump = cur != currentTab;
+        }
+        if (needJump) {
+            pager.setCurrentItem(currentTab, false);
+        }
+
+        // setCurrentItem(smooth=false) 是直接 scrollTo，不产生滚动回调，
+        // 所以导航栏胶囊不会自动跟上。这里主动同步一次。
+        if (navBar != null) navBar.setScrollOffset(currentTab);
+
+        if (savedY > 0 && pages[currentTab] != null) {
+            final ScrollView sv = pages[currentTab];
+            sv.post(new Runnable() {
+                public void run() {
+                    sv.scrollTo(0, savedY);
+                }
+            });
+        }
     }
 
     // ==================== 主框架 ====================
 
     void buildUi() {
         FrameLayout root = new FrameLayout(this);
-        root.setBackgroundColor(C_BG);
 
-        // 滑动页容器
+        // ---- 1) 背景层：渐变 + 模糊光斑 ----
+        GlassBackground bgView = new GlassBackground(this);
+        root.addView(bgView, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        // ---- 2) 页面容器（背景透明，让背景层透出来）----
         pager = new SwipePager(this);
+        pager.setBackgroundColor(0x00000000);
         pager.setPageListener(new SwipePager.OnPageListener() {
-            public void onPageSelected(int index) { updateNav(index); }
+            public void onPageSelected(int index) {
+                // 关键：手指滑页时也要更新 currentTab。
+                // 否则 currentTab 停在旧值，任何 onResume（权限弹窗、切后台）
+                // 都会执行 setCurrentItem(旧值)，把用户拉回原来的页。
+                currentTab = index;
+                updateNav(index);
+            }
+        });
+        // 页面滚动时实时驱动胶囊
+        pager.setOnProgressListener(new SwipePager.OnProgressListener() {
+            public void onScrollProgress(float offset) {
+                // 胶囊正在驱动页面时，不要回流，避免来回抖
+                if (drivingPager) return;
+                if (navBar != null) navBar.setScrollOffset(offset);
+            }
         });
         root.addView(pager, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        // 底部悬浮胶囊（FrameLayout 承载：指示器 + 三个 item）
-        FrameLayout capsule = new FrameLayout(this);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(0xFFFFFFFF);
-        bg.setCornerRadius(dp(34));
-        bg.setStroke(dp(1), 0xFFE0E0E5);
-        capsule.setBackground(bg);
-        capsule.setElevation(dp(6));
+        // ---- 3) 液态玻璃导航栏（自绘：边缘光 + 流光 + 可拖动胶囊）----
+        GlassNavView nav = new GlassNavView(this);
+        nav.setOnTabSelectedListener(new GlassNavView.OnTabSelectedListener() {
+            public void onTabSelected(int index, boolean fromDrag) {
+                if (index != currentTab) {
+                    switchTab(index, true);
+                } else {
+                    updateNav(index);
+                    // 拖动时胶囊可能停在两个 tab 之间。
+                    // 目标页没变时 pager 的 scrollX 已在正位，startScroll 距离为 0
+                    // 不会产生回调，所以胶囊必须自己归位。
+                    if (navBar != null) navBar.setCurrentIndex(index, true);
+                }
+            }
+        });
+        // 胶囊拖动时实时驱动页面
+        nav.setOnProgressListener(new GlassNavView.OnProgressListener() {
+            public void onProgressChanged(float offset) {
+                if (pager == null || pager.getWidth() <= 0) return;
+                drivingPager = true;
+                pager.scrollTo(Math.round(offset * pager.getWidth()), 0);
+                drivingPager = false;
+            }
+        });
 
-        // 内层：均分三个 item
         LinearLayout itemRow = new LinearLayout(this);
         itemRow.setOrientation(LinearLayout.HORIZONTAL);
-        itemRow.setPadding(dp(6), dp(6), dp(6), dp(6));
-        FrameLayout.LayoutParams rowLp = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        // 滑动指示器（先加，保证在 itemRow 下层）
-        navIndicator = new View(this);
-        GradientDrawable indBg = new GradientDrawable();
-        indBg.setColor(0xFFEDEDF0);
-        indBg.setCornerRadius(dp(24));
-        navIndicator.setBackground(indBg);
-        navIndicator.setAlpha(0f);
-        navIndicator.setClickable(false);
-        FrameLayout.LayoutParams indLp = new FrameLayout.LayoutParams(dp(60), dp(48));
-        indLp.leftMargin = dp(6);
-        indLp.topMargin = dp(10);
-        capsule.addView(navIndicator, indLp);
+        LinearLayout.LayoutParams unusedRow = new LinearLayout.LayoutParams(0, 0);
 
-        capsule.addView(itemRow, rowLp);
+        int navPad = dp(4);
+        int navTabH = dp(50);
 
-        for (int i = 0; i < 3; i++) {
-            final int idx = i;
+        for (int k = 0; k < 3; k++) {
+            final int idx = k;
             LinearLayout item = new LinearLayout(this);
             item.setOrientation(LinearLayout.VERTICAL);
             item.setGravity(Gravity.CENTER_HORIZONTAL | Gravity.CENTER_VERTICAL);
-            item.setOnClickListener(new View.OnClickListener() {
-                public void onClick(View v) { switchTab(idx, true); }
-            });
+            item.setClickable(false);
 
             ImageView icon = new ImageView(this);
-            icon.setImageResource(TAB_ICONS[i]);
+            icon.setImageResource(TAB_ICONS[k]);
             icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
-            LinearLayout.LayoutParams ip = new LinearLayout.LayoutParams(dp(24), dp(24));
+            LinearLayout.LayoutParams ip = new LinearLayout.LayoutParams(dp(17), dp(17));
             ip.gravity = Gravity.CENTER_HORIZONTAL;
             icon.setLayoutParams(ip);
             item.addView(icon);
 
             TextView label = new TextView(this);
-            label.setText(TAB_TITLES[i]);
-            label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+            label.setText(TAB_TITLES[k]);
+            label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 8);
             label.setIncludeFontPadding(false);
             label.setGravity(Gravity.CENTER);
             label.setSingleLine(true);
             LinearLayout.LayoutParams lp2 = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
             lp2.gravity = Gravity.CENTER_HORIZONTAL;
-            lp2.topMargin = dp(3);
+            lp2.topMargin = dp(2);
             label.setLayoutParams(lp2);
             item.addView(label);
 
-            navItems[i] = item;
-            navIcons[i] = icon;
-            navLabels[i] = label;
+            navItems[k] = item;
+            navIcons[k] = icon;
+            navLabels[k] = label;
 
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(56), 1f);
-            lp.setMargins(dp(3), 0, dp(3), 0);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, navTabH, 1f);
             itemRow.addView(item, lp);
         }
 
-        int navH = getSystemBarHeight("navigation_bar_height");
+        // 把 itemRow 铺到 GlassNavView 内（内缩 PAD=6dp）
+        FrameLayout navWrap = new FrameLayout(this);
+        navWrap.addView(nav, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        FrameLayout.LayoutParams rowInNav = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, navTabH);
+        rowInNav.gravity = Gravity.CENTER_VERTICAL;
+        rowInNav.leftMargin = navPad;
+        rowInNav.rightMargin = navPad;
+        navWrap.addView(itemRow, rowInNav);
+        itemRow.setElevation(dp(2));
+
+        // 整个导航栏高度 = tab 高 + 上下 padding
+        int navTotalH = navTabH + navPad * 2;
+
+        int sysNavH = getSystemBarHeight("navigation_bar_height");
         FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                ViewGroup.LayoutParams.MATCH_PARENT, navTotalH);
         clp.gravity = Gravity.BOTTOM;
-        clp.leftMargin = dp(22);
-        clp.rightMargin = dp(22);
-        clp.bottomMargin = navH + dp(12);
-        root.addView(capsule, clp);
+        clp.leftMargin = dp(45);
+        clp.rightMargin = dp(45);
+        clp.bottomMargin = dp(40);
+        root.addView(navWrap, clp);
+
+        navBar = nav;
+
 
         setContentView(root);
     }
@@ -206,6 +300,11 @@ public class MainActivity extends Activity {
         return dp(24);
     }
 
+    /** 状态栏高度，用于页面顶部留白 */
+    int getStatusBarHeight() {
+        return getSystemBarHeight("status_bar_height");
+    }
+
     void rebuildPages() {
         pages[0] = buildStatusPage();
         pages[1] = buildFunctionPage();
@@ -215,74 +314,53 @@ public class MainActivity extends Activity {
 
     android.view.ViewGroup getContentRoot() { return pager; }
 
-    /** 重新构建当前页（编辑保存后刷新显示值） */
+    /** 重新构建当前页（编辑保存后刷新显示值），并保留滚动位置 */
     void refreshCurrentPage() {
+        // 先记录当前滚动位置，重建后恢复，避免跳回顶部
+        final int savedY;
+        if (pages[currentTab] != null) {
+            savedY = pages[currentTab].getScrollY();
+        } else {
+            savedY = 0;
+        }
+
         rebuildPages();
         pager.setCurrentItem(currentTab, false);
+
+        if (savedY > 0 && pages[currentTab] != null) {
+            final ScrollView sv = pages[currentTab];
+            sv.post(new Runnable() {
+                public void run() {
+                    sv.scrollTo(0, savedY);
+                }
+            });
+        }
     }
 
     void switchTab(int idx, boolean animate) {
         currentTab = idx;
-        rebuildPages();
-        pager.setCurrentItem(idx, animate);
+        // 不在这里 rebuildPages()：
+        // 重建会 removeAllViews → scrollX 归零（页面跳回第 0 页），
+        // 还会打断正在进行的滚动动画。
+        // 页面内容没变，切页不需要重建。
         updateNav(idx);
+        pager.setCurrentItem(idx, animate);
+        // 无动画 = 直接 scrollTo，不会产生滚动回调，
+        // 导航栏胶囊需要手动同步，否则会停在旧位置。
+        if (!animate && navBar != null) {
+            navBar.setScrollOffset(idx);
+        }
     }
 
     void updateNav(int idx) {
         for (int i = 0; i < 3; i++) {
             boolean sel = (i == idx);
-            navIcons[i].setColorFilter(sel ? C_ACCENT : 0xFF1C1C1E);
-            navLabels[i].setTextColor(sel ? C_ACCENT : 0xFF1C1C1E);
+            navIcons[i].setColorFilter(sel ? C_ACCENT : C_TEXT_SUB);
+            navLabels[i].setTextColor(sel ? C_ACCENT_DK : C_TEXT_SUB);
             navLabels[i].setTypeface(sel ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
             navItems[i].setBackground(null);
         }
-        moveIndicator(idx);
-    }
-
-    /** 让指示器平滑移动到第 idx 个 item */
-    void moveIndicator(final int idx) {
-        if (navIndicator == null) return;
-        navItems[idx].post(new Runnable() {
-            public void run() {
-                LinearLayout target = navItems[idx];
-                int tw = target.getWidth();
-                // item.getLeft() 是相对 itemRow 的坐标；
-                // 指示器的 leftMargin 已固定为 6dp，而 itemRow 也有 6dp padding，
-                // 因此指示器目标 X = item.getLeft()（两者都从 itemRow 的 0 起算）
-                int tx = target.getLeft();
-                if (tw <= 0) return;
-
-                // 首次显示：直接定位
-                if (navIndicator.getAlpha() == 0f) {
-                    ViewGroup.LayoutParams lp = navIndicator.getLayoutParams();
-                    lp.width = tw;
-                    navIndicator.setLayoutParams(lp);
-                    navIndicator.setX(tx);
-                    navIndicator.setAlpha(1f);
-                    return;
-                }
-
-                ValueAnimator wa = ValueAnimator.ofInt(navIndicator.getWidth(), tw);
-                ValueAnimator xa = ValueAnimator.ofInt(
-                        (int) navIndicator.getX(), tx);
-                wa.setDuration(240);
-                xa.setDuration(240);
-                wa.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
-                    public void onAnimationUpdate(ValueAnimator a) {
-                        ViewGroup.LayoutParams lp = navIndicator.getLayoutParams();
-                        lp.width = (Integer) a.getAnimatedValue();
-                        navIndicator.setLayoutParams(lp);
-                    }
-                });
-                xa.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
-                    public void onAnimationUpdate(ValueAnimator a) {
-                        navIndicator.setX((Integer) a.getAnimatedValue());
-                    }
-                });
-                wa.start();
-                xa.start();
-            }
-        });
+        // 胶囊由 pager 滚动驱动，这里不再干预
     }
 
     // ==================== 页面 ====================
@@ -389,25 +467,76 @@ public class MainActivity extends Activity {
         }
     }
 
+    /**
+     * 切换某个模式的可见性。
+     *
+     * 写入规则（2026-10-21 调整）：
+     *   1) 追加时带注释，说明是什么功能；
+     *   2) 插到「模式可见性」段落里（最后一个 enable_mode 之后），不再甩到文件末尾；
+     *   3) 关闭时不删除整行，改成注释掉，保留记录；
+     *   4) 已存在注释形式的同一条目时，开启会自动复用该行。
+     */
     void setEnableMode(String className, boolean enable) {
         File dir = new File(CONF_DIR);
         if (!dir.exists()) dir.mkdirs();
         File f = new File(CONF_PATH);
+
+        String entry = "enable_mode=" + className;
+        String commented = "# enable_mode=" + className;
+        String note = "# " + shortName(className);
+
         List<String> lines = new ArrayList<>();
-        boolean found = false;
+        boolean foundActive = false;
         if (f.exists()) {
             try (BufferedReader br = new BufferedReader(new FileReader(f))) {
                 String line;
                 while ((line = br.readLine()) != null) {
                     String t = line.trim();
-                    if (t.equals("enable_mode=" + className)) {
-                        found = true;
-                        if (enable) lines.add(line);
-                    } else lines.add(line);
+                    if (t.equals(entry)) {
+                        foundActive = true;
+                        // 开启：保留；关闭：改成注释（紧跟一行说明）
+                        if (enable) {
+                            lines.add(line);
+                        } else {
+                            lines.add(commented);
+                        }
+                    } else if (t.equals(commented)) {
+                        // 已注释的同一条目
+                        if (enable) {
+                            foundActive = true;
+                            lines.add(entry);
+                        } else {
+                            lines.add(line);
+                        }
+                    } else {
+                        lines.add(line);
+                    }
                 }
             } catch (Throwable ignored) {}
         }
-        if (enable && !found) lines.add("enable_mode=" + className);
+
+        // 之前没有这一条，且要开启 → 插入到模式可见性段落
+        if (enable && !foundActive) {
+            int insertAt = -1;
+            for (int i = 0; i < lines.size(); i++) {
+                String t = lines.get(i).trim();
+                if (t.startsWith("enable_mode=") || t.startsWith("# enable_mode=")) {
+                    insertAt = i;
+                }
+            }
+            if (insertAt >= 0) {
+                lines.add(insertAt + 1, entry);
+            } else {
+                // 没有现成段落 → 新建
+                lines.add("");
+                lines.add("# ------------------------------------");
+                lines.add("# 模式可见性");
+                lines.add("# 每行一个模式类名，写 enable_mode= 表示显示");
+                lines.add("# " + entry.substring(entry.lastIndexOf('.') + 1));
+                lines.add(entry);
+            }
+        }
+
         try (FileWriter fw = new FileWriter(f)) {
             for (String l : lines) { fw.write(l); fw.write("\n"); }
             Toast.makeText(this, (enable ? "已显示：" : "已隐藏：") + shortName(className),

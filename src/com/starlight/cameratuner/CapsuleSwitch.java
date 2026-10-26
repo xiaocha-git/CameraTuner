@@ -60,9 +60,15 @@ public class CapsuleSwitch extends View {
     }
 
     public void setCheckedImmediate(boolean v) {
+        boolean changed = checked != v;
         checked = v;
         progress = v ? 1f : 0f;
         invalidate();
+        // 同步触发回调：首次加载时开关是直接设值的，不走点击流程，
+        // 如果不通知，绑定的图标就永远停在初始灰色。
+        if (changed && listener != null) {
+            listener.onCheckedChanged(this, checked);
+        }
     }
 
     private void animateTo(float target) {

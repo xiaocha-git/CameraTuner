@@ -20,6 +20,11 @@ public class SwipePager extends ViewGroup {
         void onPageSelected(int index);
     }
 
+    /** 滚动进度回调（实时，用于让导航栏胶囊跟随） */
+    public interface OnProgressListener {
+        void onScrollProgress(float offset);
+    }
+
     private final Scroller scroller;
     private final int touchSlop;
     private final int minFling;
@@ -27,9 +32,16 @@ public class SwipePager extends ViewGroup {
 
     private int currentPage = 0;
     private float downX;
+    private float downY;
     private float lastX;
     private boolean dragging;
+    private boolean intercepted;
+
+    // 挂起的目标页：子 View 未就位时先记下，等布局完成再执行
+    private int pendingIndex = -1;
+    private boolean pendingSmooth = false;
     private OnPageListener listener;
+    private OnProgressListener progressListener;
 
     public SwipePager(Context context) {
         super(context);
@@ -42,7 +54,25 @@ public class SwipePager extends ViewGroup {
         this.listener = l;
     }
 
+    public void setOnProgressListener(OnProgressListener l) {
+        this.progressListener = l;
+    }
+
+    private void notifyProgress() {
+        if (progressListener != null && getWidth() > 0) {
+            progressListener.onScrollProgress(getScrollX() / (float) getWidth());
+        }
+    }
+
     public int getCurrentItem() { return currentPage; }
+
+    /** 当前页 View（用于模糊层抓取内容） */
+    public View getCurrentPage() {
+        if (currentPage >= 0 && currentPage < getChildCount()) {
+            return getChildAt(currentPage);
+        }
+        return null;
+    }
 
     public void setPages(View[] pages) {
         removeAllViews();
@@ -50,10 +80,41 @@ public class SwipePager extends ViewGroup {
             if (p != null) addView(p);
         }
         requestLayout();
+        // 布局完成后主动检查一次挂起请求（onLayout 未必每次都触发）
+        post(new Runnable() {
+            public void run() {
+                if (pendingIndex >= 0 && pendingIndex < getChildCount()) {
+                    int t = pendingIndex;
+                    boolean sm = pendingSmooth;
+                    pendingIndex = -1;
+                    setCurrentItem(t, sm);
+                }
+            }
+        });
     }
 
     public void setCurrentItem(int index, boolean smooth) {
-        if (index < 0 || index >= getChildCount()) return;
+        if (index < 0) return;
+        if (index >= getChildCount()) {
+            // 子 View 还没加上（rebuildPages 期间），挂起，等 onLayout 后补执行
+            pendingIndex = index;
+            pendingSmooth = smooth;
+            return;
+        }
+        // 宽度未确定时也必须挂起：否则 index * 0 = 0，会滚到第 0 页，
+        // 表现就是"胶囊动了页面没动"。
+        if (getWidth() <= 0) {
+            pendingIndex = index;
+            pendingSmooth = smooth;
+            return;
+        }
+        pendingIndex = -1;
+
+        // 关键：打断任何正在进行的滚动/惯性，避免与新目标打架
+        if (scroller != null && !scroller.isFinished()) {
+            scroller.abortAnimation();
+        }
+
         boolean changed = index != currentPage;
         currentPage = index;
         int target = index * getWidth();
@@ -84,9 +145,16 @@ public class SwipePager extends ViewGroup {
             View child = getChildAt(i);
             child.layout(i * w, 0, (i + 1) * w, b - t);
         }
-        // 保证当前页位置正确
-        if (!scroller.computeScrollOffset()) {
-            scrollTo(currentPage * w, 0);
+        // 注意：这里不再无条件 scrollTo(currentPage * w)。
+        // 那会在动画进行中把位置强行拉回旧页，导致"滑块动了页面不动/跳回来"。
+        // 位置由 setCurrentItem 与 computeScroll 负责。
+
+        // 有挂起的切页请求 → 布局完成后补执行
+        if (pendingIndex >= 0 && pendingIndex < getChildCount()) {
+            int targetIdx = pendingIndex;
+            boolean smoothFlag = pendingSmooth;
+            pendingIndex = -1;
+            setCurrentItem(targetIdx, smoothFlag);
         }
     }
 
@@ -95,18 +163,40 @@ public class SwipePager extends ViewGroup {
         switch (ev.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
                 downX = ev.getX();
+                downY = ev.getY();
                 lastX = downX;
                 dragging = false;
+                intercepted = false;
+                // 用户开始触摸 → 作废任何挂起的切页请求，
+                // 否则布局完成后补执行会把页面强行拉走。
+                pendingIndex = -1;
                 if (tracker == null) tracker = VelocityTracker.obtain();
                 tracker.clear();
                 tracker.addMovement(ev);
                 break;
-            case MotionEvent.ACTION_MOVE:
+
+            case MotionEvent.ACTION_MOVE: {
+                if (intercepted) return true;   // 已经接管，不再重复判断
+                if (tracker != null) tracker.addMovement(ev);
+
                 float dx = Math.abs(ev.getX() - downX);
-                if (dx > touchSlop) {
+                float dy = Math.abs(ev.getY() - downY);
+
+                // 关键：横向位移必须明显大于纵向位移才拦截，
+                // 否则纵向滚动列表时手指的横向抖动会误触发翻页。
+                if (dx > touchSlop && dx > dy * 1.5f) {
                     dragging = true;
+                    intercepted = true;
+                    lastX = ev.getX();      // 重置基准，避免接管瞬间跳动
                     return true;
                 }
+                break;
+            }
+
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL:
+                dragging = false;
+                intercepted = false;
                 break;
         }
         return false;
@@ -120,7 +210,10 @@ public class SwipePager extends ViewGroup {
         switch (ev.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
                 downX = ev.getX();
+                downY = ev.getY();
                 lastX = downX;
+                intercepted = false;
+                pendingIndex = -1;   // 同上：用户接管后不再补执行
                 if (!scroller.isFinished()) scroller.abortAnimation();
                 return true;
 
@@ -134,6 +227,7 @@ public class SwipePager extends ViewGroup {
                 if (target < 0) target = 0;
                 if (target > maxScroll) target = maxScroll;
                 scrollTo(target, 0);
+                notifyProgress();
                 return true;
             }
 
@@ -142,13 +236,23 @@ public class SwipePager extends ViewGroup {
                 tracker.computeCurrentVelocity(1000);
                 float vx = tracker.getXVelocity();
                 int pageWidth = getWidth();
+                intercepted = false;
 
                 int target = currentPage;
                 if (Math.abs(vx) > minFling) {
                     target = vx < 0 ? currentPage + 1 : currentPage - 1;
                 } else {
+                    // 位移超过 1/4 页宽才翻页，避免轻微拖动就跳页
                     float offset = (float) getScrollX() / pageWidth;
-                    target = Math.round(offset);
+                    float frac = offset - (float) Math.floor(offset);
+                    int base = (int) Math.floor(offset);
+                    if (frac > 0.25f && frac < 0.75f) {
+                        target = Math.round(offset);
+                    } else if (frac >= 0.75f) {
+                        target = base + 1;
+                    } else {
+                        target = base;
+                    }
                 }
                 if (target < 0) target = 0;
                 if (target > getChildCount() - 1) target = getChildCount() - 1;
@@ -171,6 +275,7 @@ public class SwipePager extends ViewGroup {
     public void computeScroll() {
         if (scroller.computeScrollOffset()) {
             scrollTo(scroller.getCurrX(), 0);
+            notifyProgress();
             postInvalidateOnAnimation();
         }
     }

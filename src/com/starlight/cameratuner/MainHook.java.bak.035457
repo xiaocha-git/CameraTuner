@@ -1,0 +1,1635 @@
+package com.starlight.cameratuner;
+
+import android.os.Build;
+import android.util.Log;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileReader;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.LinkedHashMap;
+import java.util.Set;
+
+import de.robv.android.xposed.IXposedHookLoadPackage;
+import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.XC_MethodReplacement;
+import de.robv.android.xposed.XposedBridge;
+import de.robv.android.xposed.XposedHelpers;
+import de.robv.android.xposed.callbacks.XC_LoadPackage;
+
+/**
+ * 传奇一瞬解锁 + 机型伪装
+ *
+ * 作用域：com.android.camera
+ *
+ * 【三道关卡】
+ * 1) 机型伪装：让相机以为自己是 18 Pro Max（madrid）
+ * 2) LegendBokehCapsInfo：hook l9.h.m2(l9.g) 强制 true
+ * 3) RAW 回调类型：hook Camera2Module.getRawCallbackType()，
+ *    在传奇一瞬模块下返回非 0，让相机请求 RAW 流
+ *
+ * 【2026-10-18 新增】AI水印闸门
+ * 崩溃链：AIWaterModule.getAIWatermarkItem -> N1/q.a() 取空列表第0项 -> IndexOutOfBounds
+ *        空列表来源：LM1/b.c(int) 里三道门 j / Pe.b.h2() / S3() 全 false 时直接 return 空。
+ * 本 hook：强制 Pe.b.h2() 返回 true，让水印数据正常构建。
+ * 配置：aiwm.enable=1 开启，aiwm.enable=0 关闭
+ *
+ * 配置文件：/sdcard/LegendaryUnlock/config.conf
+ */
+public class MainHook implements IXposedHookLoadPackage {
+
+    private static final String TAG = "CameraTuner";
+    private static final String CAMERA_PKG = "com.android.camera";
+    private static final String CONF_PATH = "/sdcard/CameraTuner/config.conf";
+    private static final String STATUS_PATH = "/sdcard/CameraTuner/status.json";
+    private int hookCount = 0;
+
+    // 配置默认值
+    private int cfgLevel = 2;
+    private boolean cfgLog = true;
+    private boolean cfgBlockMsg = true;
+    private final Set<Integer> blockMsgSet = new HashSet<>();
+    { blockMsgSet.add(11); }
+    private String cfgWatermarkName = "";
+    private boolean cfgWatermarkEnable = false;
+    private boolean cfgFake = true;
+    private boolean cfgForceCaps = false;
+    /** 原色风格：抬 l9.h.E2 闸门，让顶栏风格列表从 2 档变 3 档 */
+    private boolean cfgCvNatural = false;
+    private boolean cfgTiltSwitch = true;      // 移轴悬浮开关
+    /** 日志过滤：为空=全部输出，否则只输出这些标签（如 tilt,zoom） */
+    private final Set<String> logFilter = new HashSet<>();
+    private boolean cfgAiWm = true;         // AI水印闸门
+    private boolean cfgOpenGate = true;     // 片门全开解锁
+    private int cfgRawType = 0x10;          // RAW 回调类型：0=关闭, 0x11=启用MultiRawHdr
+    private int cfgOpMode = 0;              // 强制 operation mode（0=不强制）
+    private int cfgRawW = 4096;             // RAW 宽度
+    private int cfgRawH = 3072;             // RAW 高度
+    private final Set<String> enableModes = new HashSet<>();
+    private final Set<String> disableModes = new HashSet<>();
+    // 焦段重映射：旧值 -> 新值
+    private boolean cfgZoom = true;      // 焦段重映射总开关
+    private boolean cfgZoomCycle = true;  // 档位循环修正
+    private boolean cfgProLens = true;    // 专业模式长焦修复
+    private final Set<Integer> proLensModes = new HashSet<>();
+    private int idxUltra = 0;   // 超广角索引
+    private int idxWide = 1;    // 主摄索引
+    private int idxMid = -1;    // 中焦索引（-1=不用）
+    private int idxTele = 4;    // 长焦索引
+    private float zoomMidFrom = 1.8f;   // 中焦起始倍率
+    private float zoomTeleFrom = 3.0f;  // 长焦起始倍率
+    { proLensModes.add(167); }
+    private float zoomCycleMin = 1.5f;    // 低于此倍率不干预
+    private final Set<Integer> zoomCycleModes = new HashSet<>();
+    private final List<Float> zoomCycleStops = new ArrayList<>();
+    private final Map<Float, Float> zoomRemap = new LinkedHashMap<>();
+    // 焦段剔除
+    private final List<Float> zoomDrop = new ArrayList<>();
+    private String fakeDevice = "madrid";
+    private String fakeModel = "2611FPNFAG";
+    private String fakeProduct = "madrid";
+
+    /** 本模块自身包名（LSPosed「始终在作用域内」会注入到这里） */
+    private static final String SELF_PKG = "com.starlight.cameratuner";
+
+    @Override
+    public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lp) {
+        if (lp == null) return;
+
+        // 被框架注入到自己的 App 进程 → 证明「框架已启用本模块」
+        if (SELF_PKG.equals(lp.packageName)) {
+            ModuleState.onInjectedIntoApp();
+            XposedBridge.log("CameraTuner: 已注入自身 App 进程，框架启用确认");
+            return;
+        }
+
+        if (!CAMERA_PKG.equals(lp.packageName)) return;
+
+        loadConfig();
+
+        // 1. 机身伪装
+        if (cfgFake) {
+            hookBuildFields(lp.classLoader);
+            hookSystemProperties(lp.classLoader);
+        }
+
+        // 2. 强制 LegendBokehCapsInfo 支持
+        if (cfgForceCaps) {
+            hookLegendBokehCaps(lp.classLoader);
+        }
+
+        // 2.5 原色风格（顶栏第三档）
+        if (cfgCvNatural) {
+            hookCvTypeNatural(lp.classLoader);
+        }
+
+        // 3. RAW 回调类型
+        if (cfgRawType != 0) {
+            hookRawCallbackType(lp.classLoader);
+            hookForceRawField(lp.classLoader);
+        }
+
+        // 4. 传奇一瞬设备等级
+        hookLegendaryDevice(lp.classLoader);
+
+        // 5. AI水印闸门（2026-10-18）
+        if (cfgAiWm) {
+            hookAiWatermark(lp.classLoader);
+        }
+
+
+        // 7. 片门全开（OpenGate）解锁（2026-10-18）
+        if (cfgOpenGate) {
+            hookOpenGate(lp.classLoader);
+        }
+
+        // 7.5 拦截退出消息（block.msg）
+        if (cfgBlockMsg && !blockMsgSet.isEmpty()) {
+            hookBlockMsg(lp.classLoader);
+        }
+
+        // 7.6 自定义水印机型
+        if (cfgWatermarkEnable && cfgWatermarkName != null && !cfgWatermarkName.isEmpty()) {
+            hookWatermarkName(lp.classLoader);
+        }
+
+        // 8. 模式可见性（enable_mode / disable_mode）
+        hookModeVisibility(lp.classLoader);
+
+        // 9. 焦段重映射
+        if (cfgZoom) {
+            hookZoomRemap(lp.classLoader);
+        }
+
+        // 10. 档位循环修正
+        if (cfgZoomCycle && !zoomCycleStops.isEmpty()) {
+            hookZoomCycle(lp.classLoader);
+        }
+
+        // 11. 专业模式长焦修复
+        if (cfgProLens) {
+            hookProLensFix(lp.classLoader);
+        }
+
+        // 写入状态文件（供 App 读取）
+        writeStatus();
+
+        // 12. 智能构图修复（移植自 XiaomiCamPort SmartCompFix）
+        try {
+            SmartCompFix.init(lp);
+        } catch (Throwable t) {
+            loge("SmartCompFix init 失败: " + t);
+        }
+
+        // 13. 传奇一瞬色彩模拟（移植自 XiaomiCamPort LegendaryColor）
+        try {
+            LegendaryColor.init(lp);
+        } catch (Throwable t) {
+            loge("LegendaryColor init 失败: " + t);
+        }
+
+        // 14. 移轴悬浮开关
+        try {
+            TiltSwitch.init(lp, cfgTiltSwitch, this);
+        } catch (Throwable t) {
+            loge("TiltSwitch init 失败: " + t);
+        }
+    }
+
+    // ==================== 焦段重映射 ====================
+
+    /**
+     * 相机底部焦段档位由 v2.y0 实例字段 d (float[]) 保存。
+     * A(int) / B(L0$a) 是重新计算该字段的方法。
+     *
+     * 做法：hook 这两个方法，在它们执行后读取 this.d，
+     *       应用重映射 + 剔除，再写回。
+     */
+    private void hookZoomRemap(ClassLoader cl) {
+        if (zoomRemap.isEmpty() && zoomDrop.isEmpty()) {
+            logi("[zoom] 未配置 zoom_remap / zoom_drop，跳过");
+            return;
+        }
+        try {
+            Class<?> c;
+            try {
+                c = XposedHelpers.findClass("v2.y0", cl);
+            } catch (Throwable e) {
+                loge("[zoom] v2.y0 类加载失败: " + e);
+                return;
+            }
+
+            final XC_MethodHook fieldHook = new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    try {
+                        Object self = param.thisObject;
+                        if (self == null) return;
+                        java.lang.reflect.Field f = null;
+                        Class<?> k = self.getClass();
+                        while (k != null && f == null) {
+                            try { f = k.getDeclaredField("d"); }
+                            catch (NoSuchFieldException e) { k = k.getSuperclass(); }
+                        }
+                        if (f == null) return;
+                        f.setAccessible(true);
+                        Object v = f.get(self);
+                        if (!(v instanceof float[])) return;
+                        float[] arr = (float[]) v;
+                        float[] out = applyZoomRules(arr);
+                        if (out != null) f.set(self, out);
+                    } catch (Throwable t) {
+                        loge("[zoom] 字段写入失败: " + t);
+                    }
+                }
+            };
+
+            int hooked = 0;
+
+            // ★★ 最优先：hook com.android.camera.data.data.i.V(int, boolean)[F
+            //    这是档位数组的最终来源（v2.y0.A() 里也是调它）
+            try {
+                Class<?> iCls = XposedHelpers.findClass("com.android.camera.data.data.i", cl);
+                XposedHelpers.findAndHookMethod(iCls, "V", int.class, boolean.class,
+                        new XC_MethodHook() {
+                            @Override
+                            protected void afterHookedMethod(MethodHookParam param) {
+                                Object r = param.getResult();
+                                if (!(r instanceof float[])) return;
+                                float[] out = applyZoomRules((float[]) r);
+                                if (out != null) param.setResult(out);
+                            }
+                        });
+                countHook();
+                logi("[zoom] 已 hook i.V(int,boolean)[F（最终源头）");
+                hooked++;
+            } catch (Throwable t) {
+                loge("[zoom] i.V hook 失败: " + t);
+            }
+
+            // ★ 优先 hook com.android.camera.data.data.F.k()[F —— 档位数组的真正源头
+            try {
+                Class<?> fCls = XposedHelpers.findClass("com.android.camera.data.data.F", cl);
+                XposedHelpers.findAndHookMethod(fCls, "k",
+                        new XC_MethodHook() {
+                            @Override
+                            protected void afterHookedMethod(MethodHookParam param) {
+                                Object r = param.getResult();
+                                if (!(r instanceof float[])) return;
+                                float[] out = applyZoomRules((float[]) r);
+                                if (out != null) param.setResult(out);
+                            }
+                        });
+                logi("[zoom] 已 hook F.k()[F（源头）");
+                hooked++;
+            } catch (Throwable t) {
+                loge("[zoom] F.k() hook 失败: " + t);
+            }
+
+            // hook A(int)
+            try {
+                XposedHelpers.findAndHookMethod(c, "A", int.class, fieldHook);
+                logi("[zoom] 已 hook v2.y0.A(int)");
+                hooked++;
+            } catch (Throwable t) {
+                logi("[zoom] A(int) hook 失败: " + t);
+            }
+            // hook B(Lv2/L0$a)
+            try {
+                Class<?> l0a = XposedHelpers.findClass("v2.L0$a", cl);
+                XposedHelpers.findAndHookMethod(c, "B", l0a, fieldHook);
+                logi("[zoom] 已 hook v2.y0.B(L0$a)");
+                hooked++;
+            } catch (Throwable t) {
+                logi("[zoom] B(L0$a) hook 失败: " + t);
+            }
+
+            // 兜底：hookAllMethods 覆盖所有同名方法
+            if (hooked == 0) {
+                try {
+                    java.util.Set<XC_MethodHook.Unhook> s1 =
+                            XposedBridge.hookAllMethods(c, "A", fieldHook);
+                    java.util.Set<XC_MethodHook.Unhook> s2 =
+                            XposedBridge.hookAllMethods(c, "B", fieldHook);
+                    hooked = (s1 == null ? 0 : s1.size()) + (s2 == null ? 0 : s2.size());
+                    logi("[zoom] 兜底 hookAllMethods: " + hooked + " 个");
+                } catch (Throwable t) {
+                    loge("[zoom] 兜底 hook 失败: " + t);
+                }
+            }
+
+            if (hooked == 0) {
+                loge("[zoom] v2.y0.A/B 全部 hook 失败");
+            }
+        } catch (Throwable t) {
+            loge("[zoom] hook 失败: " + t);
+        }
+    }
+
+    // ==================== 档位循环修正 ====================
+
+    /**
+     * 修复"到最大档后继续点击，会在错误档位间乱跳"的问题。
+     *
+     * 原理：hook v2.y0.n(int)（返回当前倍率字符串），
+     * 在 after 里用 zoomcycle_stops 计算"下一档"，替换返回值。
+     *
+     * 配置：
+     *   legend.zoomcycle=1
+     *   legend.zoomcycle_min=1.5
+     *   legend.zoomcycle_modes=163
+     *   legend.zoomcycle_stops=5,10,20
+     */
+    private void hookZoomCycle(ClassLoader cl) {
+        try {
+            Class<?> c;
+            try {
+                c = XposedHelpers.findClass("v2.y0", cl);
+            } catch (Throwable e) {
+                loge("[cycle] v2.y0 加载失败: " + e);
+                return;
+            }
+            XposedHelpers.findAndHookMethod(c, "n", int.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            try {
+                                int mode = (Integer) param.args[0];
+                                if (!zoomCycleModes.isEmpty() && !zoomCycleModes.contains(mode)) return;
+
+                                // 当前倍率
+                                Object curObj = XposedHelpers.callMethod(
+                                        param.thisObject, "getComponentValue", mode);
+                                if (!(curObj instanceof String)) return;
+                                float cur;
+                                try {
+                                    cur = Float.parseFloat(((String) curObj).trim());
+                                } catch (Throwable t) { return; }
+                                if (cur < zoomCycleMin) return;
+
+                                // 下一档
+                                float next = nextStop(cur);
+                                if (next < 0) return;
+
+                                String nextStr = fmtFloat(next);
+                                String curStr = ((String) curObj).trim();
+                                if (nextStr.equals(curStr)) return;
+
+                                Object orig = param.getResult();
+                                String origStr = orig == null ? "null" : String.valueOf(orig);
+                                if (nextStr.equals(origStr)) return;
+
+                                param.setResult(nextStr);
+                                logi("[cycle] mode=" + mode + " cur=" + curStr
+                                        + " orig=" + origStr + " -> " + nextStr);
+                            } catch (Throwable t) {
+                                loge("[cycle] 处理失败: " + t);
+                            }
+                        }
+                    });
+            countHook();
+            logi("[cycle] 已 hook v2.y0.n(int)，stops=" + zoomCycleStops);
+        } catch (Throwable t) {
+            loge("[cycle] hook 失败: " + t);
+        }
+    }
+
+    /** 找列表里第一个比 cur 大的档位；没有则回到第一个 */
+    private float nextStop(float cur) {
+        for (float s : zoomCycleStops) {
+            if (s > cur + 0.0001f) return s;
+        }
+        return zoomCycleStops.isEmpty() ? -1f : zoomCycleStops.get(0);
+    }
+
+    /** 浮点转字符串：整数不带小数点 */
+    private String fmtFloat(float v) {
+        if (Math.abs(v - Math.round(v)) < 0.0001f) {
+            return String.valueOf((int) Math.round(v));
+        }
+        return String.valueOf(v);
+    }
+
+    // ==================== 专业模式长焦修复 ====================
+
+    /**
+     * 专业模式长焦修复（照抄 XiaomiCamPort 的 telefix）
+     *
+     * hook v6.f.q()I —— 返回 roleId。
+     * 当返回 -1（找不到长焦）时，调对象自身的 K() 拿正确值替换。
+     * 日志里 XiaomiCamPort 称之为 "(roleId23 ultraTele 5x)"。
+     */
+    private void hookProLensFix(ClassLoader cl) {
+        try {
+            Class<?> c;
+            try {
+                c = XposedHelpers.findClass("v6.e", cl);
+            } catch (Throwable e) {
+                loge("[telefix] 找不到 v6.e: " + e);
+                return;
+            }
+            XposedHelpers.findAndHookMethod(c, "q",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            try {
+                                Object r = param.getResult();
+                                int old = (r instanceof Number) ? ((Number) r).intValue() : -1;
+                                if (old >= 0) return;   // 正常，不干预
+
+                                Object self = param.thisObject;
+                                if (self == null) return;
+
+                                Object k = XposedHelpers.callMethod(self, "K");
+                                if (!(k instanceof Number)) return;
+                                int nv = ((Number) k).intValue();
+                                if (nv < 0) return;
+
+                                param.setResult(nv);
+                                logi("[telefix] roleId " + old + " -> " + nv
+                                        + " (ultraTele)");
+                            } catch (Throwable t) {
+                                loge("[telefix] 处理失败: " + t);
+                            }
+                        }
+                    });
+            countHook();
+            logi("[telefix] 已 hook v6.e.q()I（roleId 修正）");
+        } catch (Throwable t) {
+            loge("[telefix] hook 失败: " + t);
+        }
+    }
+
+    /** 对档位数组应用重映射 + 剔除 */
+    private float[] applyZoomRules(float[] src) {
+        List<Float> list = new ArrayList<>();
+        for (float v : src) {
+            Float nv = zoomRemap.get(v);
+            float val = (nv != null) ? nv : v;
+            if (zoomDrop.contains(val)) continue;
+            list.add(val);
+        }
+        // 安全阀：全剔光了就放弃
+        if (list.isEmpty()) {
+            loge("[zoom] 剔除后为空，放弃本次修改");
+            return null;
+        }
+        // 与原数组一致则不改
+        if (list.size() == src.length) {
+            boolean same = true;
+            for (int i = 0; i < src.length; i++) {
+                if (Math.abs(src[i] - list.get(i)) > 0.0001f) { same = false; break; }
+            }
+            if (same) return null;
+        }
+        float[] out = new float[list.size()];
+        for (int i = 0; i < out.length; i++) out[i] = list.get(i);
+        StringBuilder sb = new StringBuilder("[zoom] 档位: ");
+        for (float v : src) sb.append(v).append(" ");
+        sb.append("-> ");
+        for (float v : out) sb.append(v).append(" ");
+        logi(sb.toString());
+        return out;
+    }
+
+    // ==================== 拦截退出消息 ====================
+
+    /**
+     * 相机在「APK 版本与机型不匹配」时会向 ActivityBase 的 Handler 发送
+     * msg.what == 11，挂上 CameraExitHint 并在 3 秒后 finish()。
+     *
+     * 本 hook 拦截这些 what 值，直接跳过处理，退出链路就断了。
+     */
+    private void hookBlockMsg(ClassLoader cl) {
+        try {
+            Class<?> c;
+            try {
+                c = XposedHelpers.findClass("com.android.camera.a$c", cl);
+            } catch (Throwable e) {
+                loge("[blockmsg] 找不到 a$c: " + e);
+                return;
+            }
+            XposedHelpers.findAndHookMethod(c, "handleMessage",
+                    android.os.Message.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            try {
+                                android.os.Message msg = (android.os.Message) param.args[0];
+                                if (msg == null) return;
+                                if (blockMsgSet.contains(msg.what)) {
+                                    param.setResult(null);   // 直接吞掉
+                                    logi("[blockmsg] 已拦截 msg.what=" + msg.what);
+                                }
+                            } catch (Throwable t) {
+                                loge("[blockmsg] 处理失败: " + t);
+                            }
+                        }
+                    });
+            countHook();
+            logi("[blockmsg] 已 hook a$c.handleMessage，拦截 " + blockMsgSet);
+        } catch (Throwable t) {
+            loge("[blockmsg] hook 失败: " + t);
+        }
+    }
+
+    // ==================== 自定义水印机型 ====================
+
+    /**
+     * 水印机型名的真实来源：
+     *   WmGalleryPreference 构造时：
+     *     w0 (deviceLogo) = Pe.b.z()
+     *     x0 (deviceName) = Pe.b.A()
+     *   然后 L4.g 调 watermark/a.J0(w0, x0, Pe.c.b())
+     *   最终渲染进水印。
+     *
+     * Pe.b.A() 内部是 return x()[1]，x() 根据 Pe.c.a（设备标识）选配置。
+     * 所以直接 hook A() 最干净。
+     */
+    private void hookWatermarkName(ClassLoader cl) {
+        try {
+            Class<?> c = XposedHelpers.findClass("Pe.b", cl);
+            XposedHelpers.findAndHookMethod(c, "A", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (cfgWatermarkName != null && !cfgWatermarkName.isEmpty()) {
+                        if (!cfgWatermarkName.equals(param.getResult())) {
+                            logi("[wm] 机型名 " + param.getResult() + " -> " + cfgWatermarkName);
+                            param.setResult(cfgWatermarkName);
+                        }
+                    }
+                }
+            });
+            countHook();
+            logi("[wm] 已 hook Pe.b.A()，机型 = " + cfgWatermarkName);
+        } catch (Throwable t) {
+            loge("[wm] hook 失败: " + t);
+        }
+    }
+
+    // ==================== 模式可见性（enable_mode / disable_mode） ====================
+
+    /**
+     * 强制显示 / 隐藏相机模式。
+     *
+     * 原理：每个模式类（*ModuleEntry）都有 support() 方法，相机用它决定
+     * 是否在菜单里展示该模式。把 support() 强制返回 true/false 即可。
+     *
+     * 配置（可在 config.conf 中写多行）：
+     *   enable_mode=com.android.camera.features.mode.xxx.XxxModuleEntry
+     *   disable_mode=com.android.camera.features.mode.yyy.YyyModuleEntry
+     */
+    private void hookModeVisibility(ClassLoader cl) {
+        if (enableModes.isEmpty() && disableModes.isEmpty()) {
+            logi("[mode] 未配置 enable_mode / disable_mode，跳过");
+            return;
+        }
+        int ok = 0, bad = 0;
+        for (final String cls : enableModes) {
+            if (hookOneMode(cl, cls, true)) ok++; else bad++;
+        }
+        for (final String cls : disableModes) {
+            if (hookOneMode(cl, cls, false)) ok++; else bad++;
+        }
+        hookCount += ok;
+        logi("[mode] 模式可见性: 成功 " + ok + " 个 / 失败 " + bad + " 个（共 "
+                + (enableModes.size() + disableModes.size()) + "）");
+    }
+
+    private boolean hookOneMode(ClassLoader cl, final String className, final boolean forceShow) {
+        try {
+            Class<?> c = XposedHelpers.findClassIfExists(className, cl);
+            if (c == null) {
+                loge("[mode] 类不存在: " + className);
+                return false;
+            }
+            XposedHelpers.findAndHookMethod(c, "support",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            param.setResult(forceShow);
+                        }
+                    });
+            logi("[mode] " + (forceShow ? "强制显示" : "强制隐藏") + " "
+                    + shortName(className) + " -> " + forceShow);
+            return true;
+        } catch (Throwable t) {
+            loge("[mode] hook 失败 " + className + ": " + t);
+            return false;
+        }
+    }
+
+    private String shortName(String cls) {
+        int i = cls.lastIndexOf('.');
+        return i >= 0 ? cls.substring(i + 1) : cls;
+    }
+
+    // ==================== 片门全开（OpenGate）解锁 ====================
+
+    /**
+     * OpenGate 即"片门全开"：全传感器读出 4096x3072 录像，不做裁切。
+     *
+     * 菜单选项由 r2.T 构建，条件为 l9.h.L4(l9.g) 返回 true。
+     * L4 内部读相机特性（HAL），本机返回 false => 选项不出现。
+     *
+     * 本 hook 强制 L4 为 true，让 open_gate 选项出现在画幅菜单里。
+     * 注意：选项出现不代表 HAL 能真出 4096x3072 视频流，需实测。
+     */
+    private void hookOpenGate(ClassLoader cl) {
+        String[] candidates = {"l9.h", "l9.1.h.1"};
+        for (String cn : candidates) {
+            try {
+                Class<?> c = XposedHelpers.findClassIfExists(cn, cl);
+                if (c == null) continue;
+                int n = 0;
+                for (final Method m : c.getDeclaredMethods()) {
+                    if (!"L4".equals(m.getName())) continue;
+                    if (m.getReturnType() != boolean.class) continue;
+                    Class<?>[] pts = m.getParameterTypes();
+                    if (pts.length != 1) continue;
+                    XposedBridge.hookMethod(m, new XC_MethodReplacement() {
+                        @Override
+                        protected Object replaceHookedMethod(MethodHookParam param) {
+                            return true;
+                        }
+                    });
+                    countHook();
+                    logi("[og] 已 hook " + cn + ".L4(" + pts[0].getName() + ")Z -> true");
+                    n++;
+                }
+                if (n > 0) return;
+            } catch (Throwable t) {
+                loge("[og] hook " + cn + " 失败: " + t);
+            }
+        }
+        loge("[og] 所有候选类都没 hook 上 L4");
+    }
+
+    // ==================== AI水印闸门 ====================
+
+    /**
+     * 强制 Pe.b.h2() 返回 true。
+     *
+     * 原逻辑（LM1/b.c(int) 开头）：
+     *   if (!Pe.b.j) {
+     *       if (!Pe.b.h2()) {
+     *           if (!xxx.S3()) return 空列表;   // <- 崩在这之后
+     *       }
+     *   }
+     *
+     * h2() 内部：T4()（混淆类里的机型判断）+ 地区判断（IN/CN）。
+     * 直接改返回值，绕开机型白名单。
+     */
+    private void hookAiWatermark(ClassLoader cl) {
+        try {
+            Class<?> c = XposedHelpers.findClassIfExists("Pe.b", cl);
+            if (c == null) {
+                loge("[aiwm] 找不到 Pe.b");
+                return;
+            }
+            int count = 0;
+            for (final Method m : c.getDeclaredMethods()) {
+                if (!"h2".equals(m.getName())) continue;
+                if (m.getReturnType() != boolean.class) continue;
+                if (m.getParameterTypes().length != 0) continue;
+
+                XposedBridge.hookMethod(m, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        Object old = param.getResult();
+                        param.setResult(true);
+                        if (!Boolean.TRUE.equals(old)) {
+                            logi("[aiwm] Pe.b.h2(): " + old + " -> true");
+                        }
+                    }
+                });
+                countHook();
+                logi("[aiwm] 已 hook Pe.b.h2() -> true");
+                count++;
+            }
+            if (count == 0) {
+                loge("[aiwm] Pe.b.h2() 未找到");
+            }
+
+            // 诊断：观察水印列表构建结果
+            hookWatermarkListDiagnose(cl);
+
+        } catch (Throwable t) {
+            loge("[aiwm] hook 失败: " + t);
+        }
+    }
+
+    /** 诊断用：记录 LM1.b.c(int) 返回的列表大小 */
+    private void hookWatermarkListDiagnose(ClassLoader cl) {
+        try {
+            Class<?> c = XposedHelpers.findClassIfExists("M1.b", cl);
+            if (c == null) {
+                logi("[aiwm] 找不到 M1.b（诊断跳过）");
+                return;
+            }
+            for (final Method m : c.getDeclaredMethods()) {
+                if (!"c".equals(m.getName())) continue;
+                if (m.getParameterTypes().length != 1) continue;
+                if (m.getParameterTypes()[0] != int.class) continue;
+                if (!java.util.ArrayList.class.isAssignableFrom(m.getReturnType())) continue;
+
+                XposedBridge.hookMethod(m, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        Object r = param.getResult();
+                        int size = -1;
+                        try {
+                            size = (Integer) r.getClass().getMethod("size").invoke(r);
+                        } catch (Throwable ignored) {}
+                        logi("[aiwm] getWatermarkByType(" + param.args[0] + ") size=" + size);
+                    }
+                });
+                logi("[aiwm] 已挂诊断 M1.b.c(int)");
+                return;
+            }
+        } catch (Throwable t) {
+            logi("[aiwm] 诊断 hook 失败: " + t);
+        }
+    }
+
+    // ==================== RAW 回调类型 ====================
+
+    private void hookRawCallbackType(ClassLoader cl) {
+        try {
+            Class<?> c = XposedHelpers.findClassIfExists(
+                    "com.android.camera.module.Camera2Module", cl);
+            if (c == null) {
+                loge("[raw] 找不到 Camera2Module");
+                return;
+            }
+            Method m = null;
+            for (Method mm : c.getDeclaredMethods()) {
+                if ("getRawCallbackType".equals(mm.getName())
+                        && mm.getParameterTypes().length == 0
+                        && mm.getReturnType() == int.class) {
+                    m = mm;
+                    break;
+                }
+            }
+            if (m == null) {
+                loge("[raw] 找不到 getRawCallbackType()I");
+                return;
+            }
+            XposedBridge.hookMethod(m, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    Object self = param.thisObject;
+                    if (self == null) {
+                        logi("[raw] getRawCallbackType 被调用(this=null)");
+                        return;
+                    }
+                    String cls = self.getClass().getName();
+                    logi("[raw] getRawCallbackType 调用者=" + cls + " 原值=" + param.getResult());
+                    // 诊断模式：记录所有调用，并对传奇一瞬强制设置
+                    if (cls.toLowerCase().contains("legendary")) {
+                        param.setResult(cfgRawType);
+                        logi("[raw]   -> 强制设为 0x" + Integer.toHexString(cfgRawType));
+                    }
+                }
+            });
+            logi("[raw] 已 hook Camera2Module.getRawCallbackType()，传奇一瞬返回 0x"
+                    + Integer.toHexString(cfgRawType));
+        } catch (Throwable t) {
+            loge("[raw] hook 失败: " + t);
+        }
+    }
+
+    /**
+     * 绕过 updateCameraConfig() 里的强制归零：
+     * 当 mLoadStreamSizeBase.y == null 时，相机把 mRawCallbackType 抹回 0。
+     * 这里在 updateCameraConfig() 执行后，以及 startPreview() 执行前，
+     * 直接把字段写回你想要的值。
+     */
+    private void hookForceRawField(ClassLoader cl) {
+        try {
+            Class<?> c = XposedHelpers.findClassIfExists(
+                    "com.android.camera.module.Camera2Module", cl);
+            if (c == null) {
+                loge("[rawfield] 找不到 Camera2Module");
+                return;
+            }
+
+            XC_MethodHook setter = new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    forceRawField(param.thisObject);
+                }
+            };
+
+            // updateCameraConfig 是私有方法，执行完立刻写回
+            try {
+                Method upd = c.getDeclaredMethod("updateCameraConfig");
+                upd.setAccessible(true);
+                XposedBridge.hookMethod(upd, setter);
+                logi("[rawfield] 已 hook updateCameraConfig()");
+            } catch (Throwable t) {
+                loge("[rawfield] updateCameraConfig hook 失败: " + t);
+            }
+
+            // startPreview 之前再补一次
+            try {
+                Method sp = c.getDeclaredMethod("startPreview");
+                sp.setAccessible(true);
+                XposedBridge.hookMethod(sp, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        forceRawField(param.thisObject);
+                    }
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        forceRawField(param.thisObject);
+                    }
+                });
+                logi("[rawfield] 已 hook startPreview()");
+            } catch (Throwable t) {
+                loge("[rawfield] startPreview hook 失败: " + t);
+            }
+        } catch (Throwable t) {
+            loge("[rawfield] 初始化失败: " + t);
+        }
+    }
+
+    /** 把实例的 mRawCallbackType 强制写成 cfgRawType，并补上 RAW 尺寸 */
+    private void forceRawField(Object module) {
+        if (module == null) return;
+        String cls = module.getClass().getName();
+        if (!cls.toLowerCase().contains("legendary")) return;
+
+        // 先补 RAW 尺寸（mLoadStreamSizeBase.y），否则 HAL 会 abort
+        fillRawSize(module);
+
+        // 强制 operation mode（测试 HAL 白名单）
+        if (cfgOpMode != 0) {
+            forceOpMode(module);
+        }
+
+        try {
+            java.lang.reflect.Field f = null;
+            Class<?> k = module.getClass();
+            while (k != null && f == null) {
+                try {
+                    f = k.getDeclaredField("mRawCallbackType");
+                } catch (NoSuchFieldException ignore) {
+                    k = k.getSuperclass();
+                }
+            }
+            if (f == null) {
+                loge("[rawfield] 找不到 mRawCallbackType 字段");
+                return;
+            }
+            f.setAccessible(true);
+            int old = f.getInt(module);
+            if (old != cfgRawType) {
+                f.setInt(module, cfgRawType);
+                logi("[rawfield] mRawCallbackType: " + old + " -> " + cfgRawType
+                        + " (" + cls + ")");
+            }
+        } catch (Throwable t) {
+            loge("[rawfield] 写字段失败: " + t);
+        }
+    }
+
+    /** 强制 mOperatingMode（测试 HAL 的 mode 白名单） */
+    private void forceOpMode(Object module) {
+        try {
+            java.lang.reflect.Field f = null;
+            Class<?> k = module.getClass();
+            while (k != null && f == null) {
+                try { f = k.getDeclaredField("mOperatingMode"); }
+                catch (NoSuchFieldException ignore) { k = k.getSuperclass(); }
+            }
+            if (f == null) { loge("[opmode] 找不到 mOperatingMode"); return; }
+            f.setAccessible(true);
+            int old = f.getInt(module);
+            if (old != cfgOpMode) {
+                f.setInt(module, cfgOpMode);
+                logi("[opmode] mOperatingMode: 0x" + Integer.toHexString(old)
+                        + " -> 0x" + Integer.toHexString(cfgOpMode));
+            }
+        } catch (Throwable t) {
+            loge("[opmode] 失败: " + t);
+        }
+    }
+
+    /** 补齐 mLoadStreamSizeBase.y（RAW 尺寸），否则相机/ HAL 会拒绝 RAW 流 */
+    private void fillRawSize(Object module) {
+        try {
+            java.lang.reflect.Field baseF = null;
+            Class<?> k = module.getClass();
+            while (k != null && baseF == null) {
+                try {
+                    baseF = k.getDeclaredField("mLoadStreamSizeBase");
+                } catch (NoSuchFieldException ignore) {
+                    k = k.getSuperclass();
+                }
+            }
+            if (baseF == null) {
+                loge("[rawsize] 找不到 mLoadStreamSizeBase");
+                return;
+            }
+            baseF.setAccessible(true);
+            Object base = baseF.get(module);
+            if (base == null) {
+                loge("[rawsize] mLoadStreamSizeBase 为 null");
+                return;
+            }
+            // 沿继承链查找 y 字段（运行时实际类型可能是 m6.o 等子类）
+            java.lang.reflect.Field yF = null;
+            Class<?> bc = base.getClass();
+            while (bc != null && yF == null) {
+                try {
+                    yF = bc.getDeclaredField("y");
+                } catch (NoSuchFieldException ignore) {
+                    bc = bc.getSuperclass();
+                }
+            }
+            if (yF == null) {
+                loge("[rawsize] 继承链上也找不到 y 字段, 实际类=" + base.getClass().getName());
+                return;
+            }
+            yF.setAccessible(true);
+            Object cur = yF.get(base);
+            logi("[rawsize] 当前 y = " + cur + " (实际类=" + base.getClass().getName() + ")");
+            if (cur == null) {
+                yF.set(base, new android.util.Size(cfgRawW, cfgRawH));
+                logi("[rawsize] mLoadStreamSizeBase.y: null -> " + cfgRawW + "x" + cfgRawH);
+            }
+        } catch (Throwable t) {
+            loge("[rawsize] 补尺寸失败: " + t);
+        }
+
+        // 同时补 l9.m0.n（RawImageReader 实际使用的尺寸）
+        fillM0Size(module);
+    }
+
+    /** 补齐 Ll9/m0;->n（RAW ImageReader 实际使用的尺寸） */
+    private void fillM0Size(Object module) {
+        try {
+            // 从 mCameraManager 拿 l9.l0，再取 m0
+            java.lang.reflect.Field cmF = null;
+            Class<?> k = module.getClass();
+            while (k != null && cmF == null) {
+                try { cmF = k.getDeclaredField("mCameraManager"); }
+                catch (NoSuchFieldException ignore) { k = k.getSuperclass(); }
+            }
+            if (cmF == null) { loge("[rawsize] 找不到 mCameraManager"); return; }
+            cmF.setAccessible(true);
+            Object cm = cmF.get(module);
+            if (cm == null) { loge("[rawsize] mCameraManager 为 null"); return; }
+
+            Object l0 = cm.getClass().getMethod("K0").invoke(cm);
+            if (l0 == null) { loge("[rawsize] l0 为 null"); return; }
+
+            java.lang.reflect.Field aF = l0.getClass().getDeclaredField("a");
+            aF.setAccessible(true);
+            Object m0 = aF.get(l0);
+            if (m0 == null) { loge("[rawsize] m0 为 null"); return; }
+
+            java.lang.reflect.Field nF = null;
+            Class<?> mk = m0.getClass();
+            while (mk != null && nF == null) {
+                try { nF = mk.getDeclaredField("n"); }
+                catch (NoSuchFieldException ignore) { mk = mk.getSuperclass(); }
+            }
+            if (nF == null) { loge("[rawsize] 找不到 m0.n"); return; }
+            nF.setAccessible(true);
+            Object cur = nF.get(m0);
+            logi("[rawsize] m0.n 当前 = " + cur);
+            if (cur == null) {
+                nF.set(m0, new android.util.Size(cfgRawW, cfgRawH));
+                logi("[rawsize] m0.n: null -> " + cfgRawW + "x" + cfgRawH);
+            }
+        } catch (Throwable t) {
+            loge("[rawsize] 补 m0.n 失败: " + t);
+        }
+    }
+
+    // ==================== 关键：LegendBokehCapsInfo ====================
+
+    /**
+     * 原色风格：抬 l9.h.E2(l9.g) 闸门（等价于位掩码 l9.g.J0(3) 的第 3 位）。
+     * 强制 true 后，顶栏风格列表从 [生动/经典] 变成 [原色/生动/经典]。
+     * 三档对应的 updateCvType 值：0=原色 1=生动 2=经典。
+     */
+    private void hookCvTypeNatural(ClassLoader cl) {
+        if (hookCapsMethod("l9.h", "E2", cl)) {
+            logi("[cvtype] l9.h.E2 -> true（原色风格已解锁）");
+        } else {
+            logi("[cvtype] l9.h.E2 未找到，原色风格解锁失败");
+        }
+    }
+
+    private void hookLegendBokehCaps(ClassLoader cl) {
+        boolean ok = hookCapsMethod("l9.h", "m2", cl);
+        if (!ok) {
+            logi("[caps] l9.h.m2 未找到");
+        }
+    }
+
+    private boolean hookCapsMethod(String className, String methodName, ClassLoader cl) {
+        try {
+            Class<?> c = XposedHelpers.findClassIfExists(className, cl);
+            if (c == null) {
+                logi("[caps] 类不存在：" + className);
+                return false;
+            }
+            int count = 0;
+            for (final Method m : c.getDeclaredMethods()) {
+                if (!methodName.equals(m.getName())) continue;
+                if (m.getReturnType() != boolean.class) continue;
+                Class<?>[] pts = m.getParameterTypes();
+                if (pts.length != 1) continue;
+
+                XposedBridge.hookMethod(m, new XC_MethodReplacement() {
+                    @Override
+                    protected Object replaceHookedMethod(MethodHookParam param) {
+                        return true;
+                    }
+                });
+                logi("[caps] 已 hook " + className + "." + methodName
+                        + "(" + pts[0].getName() + ")Z -> true");
+                count++;
+            }
+            return count > 0;
+        } catch (Throwable t) {
+            loge("[caps] hook " + className + " 失败: " + t);
+            return false;
+        }
+    }
+
+    // ==================== 机型伪装 ====================
+
+    private void hookBuildFields(ClassLoader cl) {
+        try {
+            Class<?> buildCls = XposedHelpers.findClassIfExists("android.os.Build", cl);
+            if (buildCls == null) {
+                loge("找不到 android.os.Build");
+                return;
+            }
+            setStaticField(buildCls, "DEVICE", fakeDevice);
+            setStaticField(buildCls, "PRODUCT", fakeProduct);
+            setStaticField(buildCls, "MODEL", fakeModel);
+            logi("Build 伪装完成: DEVICE=" + fakeDevice + " MODEL=" + fakeModel);
+        } catch (Throwable t) {
+            loge("hook Build 失败: " + t);
+        }
+    }
+
+    private void setStaticField(Class<?> cls, String name, String value) {
+        try {
+            java.lang.reflect.Field f = cls.getDeclaredField(name);
+            f.setAccessible(true);
+            Object old = f.get(null);
+            f.set(null, value);
+            logi("  Build." + name + ": " + old + " -> " + value);
+        } catch (Throwable t) {
+            loge("  改 Build." + name + " 失败: " + t);
+        }
+    }
+
+    private void hookSystemProperties(ClassLoader cl) {
+        try {
+            Class<?> sp = XposedHelpers.findClassIfExists("android.os.SystemProperties", cl);
+            if (sp == null) {
+                loge("找不到 SystemProperties");
+                return;
+            }
+            String[] methods = {"get", "getInt", "getLong", "getBoolean"};
+            for (String m : methods) {
+                for (Method method : sp.getDeclaredMethods()) {
+                    if (!method.getName().equals(m)) continue;
+                    Class<?>[] pts = method.getParameterTypes();
+                    if (pts.length == 0 || pts[0] != String.class) continue;
+
+                    XposedBridge.hookMethod(method, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            Object arg0 = param.args[0];
+                            if (!(arg0 instanceof String)) return;
+                            String fake = mapKey((String) arg0);
+                            if (fake != null) param.args[0] = fake;
+                        }
+                    });
+                }
+            }
+            logi("SystemProperties.get 已拦截");
+        } catch (Throwable t) {
+            loge("hook SystemProperties 失败: " + t);
+        }
+    }
+
+    private String mapKey(String key) {
+        switch (key) {
+            case "ro.product.device":
+            case "ro.product.name":
+            case "ro.build.product":
+            case "ro.product.mod_device":
+            case "ro.boot.product.hardware.sku":
+                return fakeDevice;
+            case "ro.product.model":
+                return fakeModel;
+            case "ro.product.marketname":
+                if (cfgWatermarkName != null && !cfgWatermarkName.isEmpty()) {
+                    return cfgWatermarkName;
+                }
+                return null;
+            default:
+                return null;
+        }
+    }
+
+    // ==================== 传奇一瞬等级 ====================
+
+    private void hookLegendaryDevice(ClassLoader cl) {
+        String[] candidates = {"T3.c", "y3.a", "y3.f"};
+        for (String cn : candidates) {
+            if (hookLevelMethod(cn, cl)) return;
+        }
+        loge("传奇设备等级：所有候选类都没 hook 上");
+    }
+
+    private boolean hookLevelMethod(String className, ClassLoader cl) {
+        try {
+            Class<?> c = XposedHelpers.findClassIfExists(className, cl);
+            if (c == null) {
+                logi("[level] 类不存在：" + className);
+                return false;
+            }
+            int count = 0;
+            for (final Method m : c.getDeclaredMethods()) {
+                if (!"i".equals(m.getName())) continue;
+                if (m.getParameterTypes().length != 0) continue;
+
+                XposedBridge.hookMethod(m, new XC_MethodReplacement() {
+                    @Override
+                    protected Object replaceHookedMethod(MethodHookParam param) {
+                        Class<?> rt = ((Method) param.method).getReturnType();
+                        if (rt == int.class) return cfgLevel;
+                        if (rt == boolean.class) return cfgLevel != 0;
+                        try {
+                            java.lang.reflect.Constructor<?> ctor = rt.getDeclaredConstructor();
+                            ctor.setAccessible(true);
+                            return ctor.newInstance();
+                        } catch (Throwable t) {
+                            return null;
+                        }
+                    }
+                });
+                logi("[level] 已 hook " + className + "#i() 返回类型=" + m.getReturnType().getName());
+                count++;
+            }
+            return count > 0;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    // ==================== 配置 ====================
+
+    /** 写运行状态文件，供 App 界面显示 */
+    private void writeStatus() {
+        try {
+            StringBuilder sb = new StringBuilder();
+            sb.append("{\n");
+            sb.append("  \"time\": \"").append(fmtTime()).append("\",\n");
+            sb.append("  \"pid\": ").append(android.os.Process.myPid()).append(",\n");
+            sb.append("  \"hooks\": ").append(hookCount).append(",\n");
+            sb.append("  \"fake\": ").append(cfgFake).append(",\n");
+            sb.append("  \"caps\": ").append(cfgForceCaps).append(",\n");
+            sb.append("  \"aiwm\": ").append(cfgAiWm).append(",\n");
+            sb.append("  \"opengate\": ").append(cfgOpenGate).append(",\n");
+            sb.append("  \"zoom\": ").append(cfgZoom && !zoomRemap.isEmpty()).append(",\n");
+            sb.append("  \"zoomcycle\": ").append(cfgZoomCycle && !zoomCycleStops.isEmpty()).append(",\n");
+            sb.append("  \"modes\": ").append(enableModes.size() + disableModes.size()).append(",\n");
+            sb.append("  \"version\": \"1.3\"\n");
+            sb.append("}\n");
+
+            java.io.FileWriter fw = new java.io.FileWriter(STATUS_PATH);
+            fw.write(sb.toString());
+            fw.close();
+        } catch (Throwable t) {
+            loge("写状态文件失败: " + t);
+        }
+    }
+
+    private String fmtTime() {
+        java.text.SimpleDateFormat sdf =
+                new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault());
+        return sdf.format(new java.util.Date());
+    }
+
+    /** 首次运行时生成完整配置文件 */
+    private void ensureConfigExists(File f) {
+        try {
+            File dir = f.getParentFile();
+            if (dir != null && !dir.exists()) dir.mkdirs();
+            String template =
+                    "# Xiaomi CameraTuner 配置文件\n"
+                  + "# 修改后需重启相机进程才能生效\n"
+                  + "#\n"
+                  + "# log: 0=关 1=基本日志\n"
+                  + "log=1\n"
+                  + "\n"
+                  + "# ──────────────────────────────\n"
+                  + "# 机型伪装\n"
+
+                  + "# 让相机认为自己是 18 Pro Max (madrid)\n"
+                  + "fake.enable=1\n"
+                  + "# 自定义水印机型（开关打开后生效，名称留空则用默认）\n"
+                  + "watermark.enable=0\n"
+
+                  + "watermark.name=\n"
+                  + "fake.device=madrid\n"
+                  + "fake.model=2611FPNFAG\n"
+                  + "fake.product=madrid\n"
+                  + "\n"
+                  + "# ──────────────────────────────\n"
+                  + "# 传奇一瞬\n"
+
+                  + "caps.force=0\n"
+                  + "# 原色风格：解锁顶栏第三档「原色」（0=关 1=开）\n"
+                  + "cvtype.natural=0\n"
+                  + "\n"
+                  + "# 移轴悬浮开关（1=显示左上角悬浮开关，0=不显示）\n"
+                  + "tilt.switch=1\n"
+                  + "\n"
+                  + "# 日志过滤：留空=全部输出；填标签则只输出这些（逗号分隔）\n"
+                  + "# 可用标签: tilt, zoom, cycle, telefix, caps, cvtype, aiwm, og,\n"
+                  + "#           raw, rawfield, rawsize, opmode, mode, blockmsg, wm, level\n"
+                  + "log.filter=\n"
+                  + "level=2\n"
+                  + "raw.type=0x10\n"
+                  + "\n"
+                  + "# ──────────────────────────────\n"
+                  + "# AI 水印\n"
+
+                  + "# 绕过机型限制，让 AI 水印不崩\n"
+                  + "aiwm.enable=1\n"
+                  + "\n"
+                  + "# ──────────────────────────────\n"
+                  + "# 片门全开\n"
+
+                  + "# 专业录像可输出 4096x3072 全画幅\n"
+                  + "opengate.enable=1\n"
+                  + "\n"
+                  + "# ──────────────────────────────\n"
+                  + "# 焦段重映射\n"
+
+                  + "# 若已安装 XiaomiCamPort，请设为 0 以免冲突\n"
+                  + "zoom.enable=1\n"
+                  + "# 格式：旧:新，逗号分隔\n"
+                  + "# 15 Pro (haotian) 推荐值：\n"
+                  + "zoom_remap=0.7:0.6,3.2:5.0,6.4:10.0\n"
+                  + "# 档位剔除（这些档位会被移除，逗号分隔）\n"
+                  + "zoom_drop=4.3\n"
+                  + "\n"
+                  + "# ──────────────────────────────\n"
+                  + "# 档位循环修正\n"
+
+                  + "# 修复「到最大档后继续点击会乱跳」的问题\n"
+                  + "legend.zoomcycle=1\n"
+                  + "# 低于此倍率不干预\n"
+                  + "legend.zoomcycle_min=1.5\n"
+                  + "# 生效模式（163=拍照）\n"
+                  + "legend.zoomcycle_modes=163\n"
+                  + "# 循环档位表\n"
+                  + "legend.zoomcycle_stops=5,10,20\n"
+                  + "\n"
+                  + "# ──────────────────────────────\n"
+                  + "# 专业模式长焦修复\n"
+
+                  + "# 修专业模式(167)点 5x 调用不到长焦的问题\n"
+                  + "legend.prolens=1\n"
+                  + "legend.prolens_modes=167\n"
+                  + "# 镜头 roleId（一般无需修改，修改后需重启相机）\n"
+                  + "prolens.idx_tele=4\n"
+                  + "prolens.idx_wide=1\n"
+                  + "prolens.idx_ultra=0\n"
+                  + "\n"
+                  + "# ──────────────────────────────\n"
+                  + "# 模式可见性\n"
+
+                  + "# 可写多行\n"
+                  + "# 默认解锁 AI 帮拍（需联网）\n"
+                  + "enable_mode=com.android.camera.features.mode.ai.AiModuleEntry\n"
+                  + "# enable_mode=com.android.camera.features.mode.cinemaster.CinemasterModuleEntry\n"
+                  + "# disable_mode=com.android.camera.features.mode.cosmeticmirror.CosmeticMirrorModuleEntry\n"
+                  + "\n"
+                  + "# ──────────────────────────────\n"
+                  + "# 智能构图（AI帮拍里那个点了没反应的按钮）\n"
+                  + "# 0=关  1=抬U3  2=+比例门  3=+下发门  4=+兜底门\n"
+                  + "# 5=只抬V3走v1  6=+F.w/isSwitchOn  7=+补齐v1三门\n"
+                  + "# 推荐 7（真实数据通路；HAL 不出数据时走合成后门）\n"
+                  + "ai.smartcomp=7\n"
+                  + "# submitAiComposition 是否放行（v1 需要它下发，默认 1）\n"
+                  + "ai.smartcomp.submit=1\n"
+                  + "# 合成数据索引 1..48\n"
+                  + "ai.smartcomp.dbgindex=1\n"
+                  + "# 每次合成后索引自增（演示轮播）\n"
+                  + "ai.smartcomp.cycle=0\n"
+                  + "# fragment debug TextView 放行（有 NPE 风险，默认关）\n"
+                  + "ai.smartcomp.dbgfrag=0\n"
+                  + "\n"
+                  + "# ──────────────────────────────\n"
+                  + "# 传奇一瞬色彩模拟（让传奇一瞬正常出片）\n"
+                  + "# 18PM 的传奇色彩在 HAL 里，本机 HAL 没有，\n"
+                  + "# 所以映射到相机自带的 CubeLut 滤镜管线\n"
+                  + "legend.color=1\n"
+                  + "# 三种风格对应的滤镜 id（可写数字或 LUT 名）\n"
+                  + "#   M3  默认 86 = H_400 黑白400\n"
+                  + "legend.filter.m3=86\n"
+                  + "#   M9  默认 83 = F_50 富士50\n"
+                  + "legend.filter.m9=84\n"
+                  + "#   M10R 默认 71 = FILM 胶片\n"
+                  + "legend.filter.m10r=73\n"
+                  + "# 滤镜强度 0-100\n"
+                  + "legend.degree=100\n";
+
+            java.io.FileWriter fw = new java.io.FileWriter(f);
+            fw.write(template);
+            fw.close();
+            logi("已生成默认配置文件: " + CONF_PATH);
+        } catch (Throwable t) {
+            loge("生成配置文件失败: " + t);
+        }
+    }
+
+    private void loadConfig() {
+        File f = new File(CONF_PATH);
+        if (!f.exists()) {
+            ensureConfigExists(f);
+        }
+        if (!f.exists()) {
+            logi("配置文件不存在且创建失败，使用默认值");
+            return;
+        }
+        try (BufferedReader br = new BufferedReader(new FileReader(f))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                line = line.trim();
+                if (line.isEmpty() || line.startsWith("#")) continue;
+                int eq = line.indexOf('=');
+                if (eq < 0) continue;
+                String k = line.substring(0, eq).trim();
+                String v = line.substring(eq + 1).trim();
+                switch (k) {
+                    case "level":
+                        try { cfgLevel = Integer.parseInt(v); } catch (Exception ignored) {}
+                        break;
+                    case "log":
+                        cfgLog = "1".equals(v) || "true".equalsIgnoreCase(v);
+                        break;
+                    case "fake.enable":
+                        cfgFake = "1".equals(v) || "true".equalsIgnoreCase(v);
+                        break;
+                    case "watermark.name":
+                        cfgWatermarkName = v;
+                        break;
+                    case "watermark.enable":
+                        cfgWatermarkEnable = "1".equals(v) || "true".equalsIgnoreCase(v);
+                        break;
+                    case "block.msg":
+                        if (!v.isEmpty()) {
+                            blockMsgSet.clear();
+                            for (String x : v.split(",")) {
+                                try { blockMsgSet.add(Integer.parseInt(x.trim())); }
+                                catch (Exception ignored) {}
+                            }
+                        }
+                        break;
+                    case "caps.force":
+                        cfgForceCaps = "1".equals(v) || "true".equalsIgnoreCase(v);
+                        break;
+                    case "cvtype.natural":
+                        cfgCvNatural = "1".equals(v) || "true".equalsIgnoreCase(v);
+                        break;
+                    case "tilt.switch":
+                        cfgTiltSwitch = "1".equals(v) || "true".equalsIgnoreCase(v);
+                        break;
+                    case "log.filter":
+                        logFilter.clear();
+                        for (String x : v.split(",")) {
+                            String t = x.trim();
+                            if (!t.isEmpty()) logFilter.add(t);
+                        }
+                        break;
+                    case "aiwm.enable":
+                        cfgAiWm = "1".equals(v) || "true".equalsIgnoreCase(v);
+                        break;
+                    case "opengate.enable":
+                        cfgOpenGate = "1".equals(v) || "true".equalsIgnoreCase(v);
+                        break;
+                    case "opmode.force":
+                        try {
+                            if (v.startsWith("0x") || v.startsWith("0X")) {
+                                cfgOpMode = Integer.parseInt(v.substring(2), 16);
+                            } else {
+                                cfgOpMode = Integer.parseInt(v);
+                            }
+                        } catch (Exception ignored) {}
+                        break;
+                    case "raw.size":
+                        try {
+                            String[] wh = v.toLowerCase().split("x");
+                            cfgRawW = Integer.parseInt(wh[0].trim());
+                            cfgRawH = Integer.parseInt(wh[1].trim());
+                        } catch (Exception ignored) {}
+                        break;
+                    case "raw.type":
+                        try {
+                            // 支持 16 / 0x10 两种写法
+                            if (v.startsWith("0x") || v.startsWith("0X")) {
+                                cfgRawType = Integer.parseInt(v.substring(2), 16);
+                            } else {
+                                cfgRawType = Integer.parseInt(v);
+                            }
+                        } catch (Exception ignored) {}
+                        break;
+                    case "zoom.enable":
+                        cfgZoom = "1".equals(v) || "true".equalsIgnoreCase(v);
+                        break;
+                    case "legend.prolens":
+                        cfgProLens = "1".equals(v) || "true".equalsIgnoreCase(v);
+                        break;
+                    case "prolens.idx_ultra":
+                        try { idxUltra = Integer.parseInt(v); } catch (Exception ignored) {}
+                        break;
+                    case "prolens.idx_wide":
+                        try { idxWide = Integer.parseInt(v); } catch (Exception ignored) {}
+                        break;
+                    case "prolens.idx_mid":
+                        try { idxMid = Integer.parseInt(v); } catch (Exception ignored) {}
+                        break;
+                    case "prolens.idx_tele":
+                        try { idxTele = Integer.parseInt(v); } catch (Exception ignored) {}
+                        break;
+                    case "prolens.zoom_mid":
+                        try { zoomMidFrom = Float.parseFloat(v); } catch (Exception ignored) {}
+                        break;
+                    case "prolens.zoom_tele":
+                        try { zoomTeleFrom = Float.parseFloat(v); } catch (Exception ignored) {}
+                        break;
+                    case "legend.prolens_modes":
+                        proLensModes.clear();
+                        for (String m : v.split(",")) {
+                            try { proLensModes.add(Integer.parseInt(m.trim())); }
+                            catch (Exception ignored) {}
+                        }
+                        break;
+                    case "legend.zoomcycle":
+                        cfgZoomCycle = "1".equals(v) || "true".equalsIgnoreCase(v);
+                        break;
+                    case "legend.zoomcycle_min":
+                        try { zoomCycleMin = Float.parseFloat(v); } catch (Exception ignored) {}
+                        break;
+                    case "legend.zoomcycle_modes":
+                        for (String m : v.split(",")) {
+                            try { zoomCycleModes.add(Integer.parseInt(m.trim())); }
+                            catch (Exception ignored) {}
+                        }
+                        break;
+                    case "legend.zoomcycle_stops":
+                        for (String m : v.split(",")) {
+                            try { zoomCycleStops.add(Float.parseFloat(m.trim())); }
+                            catch (Exception ignored) {}
+                        }
+                        break;
+                    case "zoom_remap":
+                        for (String pair : v.split(",")) {
+                            String[] kv = pair.trim().split(":");
+                            if (kv.length == 2) {
+                                try {
+                                    zoomRemap.put(Float.parseFloat(kv[0].trim()),
+                                            Float.parseFloat(kv[1].trim()));
+                                } catch (Exception ignored) {}
+                            }
+                        }
+                        break;
+                    case "zoom_drop":
+                        for (String d : v.split(",")) {
+                            try { zoomDrop.add(Float.parseFloat(d.trim())); }
+                            catch (Exception ignored) {}
+                        }
+                        break;
+                    case "enable_mode":
+                        if (!v.isEmpty()) enableModes.add(v);
+                        break;
+                    case "disable_mode":
+                        if (!v.isEmpty()) disableModes.add(v);
+                        break;
+                    case "fake.device":
+                        fakeDevice = v;
+                        break;
+                    case "fake.model":
+                        fakeModel = v;
+                        break;
+                    case "fake.product":
+                        fakeProduct = v;
+                        break;
+                }
+            }
+        } catch (Throwable t) {
+            loge("读取配置失败: " + t);
+        }
+        ensureLegendKeys(f);
+        logi("配置: level=" + cfgLevel + " fake=" + cfgFake + " caps=" + cfgForceCaps
+                + " aiwm=" + cfgAiWm + " cvnat=" + cfgCvNatural
+                + " rawType=0x" + Integer.toHexString(cfgRawType) + " rawSize=" + cfgRawW + "x" + cfgRawH + " opMode=0x" + Integer.toHexString(cfgOpMode)
+                + " device=" + fakeDevice + " model=" + fakeModel
+                + " zoomRemap=" + zoomRemap.size()
+                + " zoomDrop=" + zoomDrop.size()
+                + " enableModes=" + enableModes.size()
+                + " disableModes=" + disableModes.size());
+    }
+
+    /**
+     * 补齐缺失的传奇色彩配置键（旧版本升级场景）。
+     * 只在文件里完全没有该键时才追加，已有值一概不动。
+     */
+    private void ensureLegendKeys(java.io.File f) {
+        if (f == null || !f.exists()) {
+            return;
+        }
+        final String[] keys = {
+                "legend.color", "legend.filter.m3", "legend.filter.m9",
+                "legend.filter.m10r", "legend.degree", "ai.smartcomp",
+                "ai.smartcomp.submit", "ai.smartcomp.dbgindex",
+                "ai.smartcomp.cycle", "ai.smartcomp.dbgfrag", "cvtype.natural"};
+        final String[] vals = {
+                "1", "86", "84", "73", "100", "7", "1", "1", "0", "0", "0"};
+
+        boolean[] present = new boolean[keys.length];
+        try (BufferedReader br = new BufferedReader(new FileReader(f))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                String t = line.trim();
+                if (t.isEmpty() || t.startsWith("#")) continue;
+                int eq = t.indexOf('=');
+                if (eq < 0) continue;
+                String k = t.substring(0, eq).trim();
+                for (int i = 0; i < keys.length; i++) {
+                    if (keys[i].equals(k)) present[i] = true;
+                }
+            }
+        } catch (Throwable t) {
+            loge("检查配置键失败: " + t);
+            return;
+        }
+
+        StringBuilder add = new StringBuilder();
+        for (int i = 0; i < keys.length; i++) {
+            if (!present[i]) {
+                add.append(keys[i]).append('=').append(vals[i]).append('\n');
+            }
+        }
+        if (add.length() == 0) {
+            return;
+        }
+        try (java.io.FileWriter fw = new java.io.FileWriter(f, true)) {
+            fw.write("\n# ── 升级自动补齐 ──\n");
+            fw.write(add.toString());
+            logi("已补齐缺失配置键: " + add.toString().replace('\n', ' '));
+        } catch (Throwable t) {
+            loge("补写配置失败: " + t);
+        }
+    }
+
+    private void countHook() { hookCount++; }
+
+    private void logi(String s) {
+        if (!cfgLog) return;
+        if (!passFilter(s)) return;
+        Log.i(TAG, s);
+        XposedBridge.log(TAG + ": " + s);
+    }
+
+    /** 按 [tag] 前缀过滤日志；logFilter 为空则全部通过 */
+    private boolean passFilter(String s) {
+        if (logFilter.isEmpty()) return true;
+        if (s == null) return false;
+        int l = s.indexOf('[');
+        if (l != 0) return false;
+        int r = s.indexOf(']', l);
+        if (r < 0) return false;
+        return logFilter.contains(s.substring(l + 1, r));
+    }
+
+    /** 供 TiltSwitch 复用的过滤判断 */
+    boolean logAllowed(String tag) {
+        return logFilter.isEmpty() || logFilter.contains(tag);
+    }
+
+    private void loge(String s) {
+        Log.e(TAG, s);
+        XposedBridge.log(TAG + " [E]: " + s);
+    }
+}

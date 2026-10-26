@@ -1,0 +1,432 @@
+package com.starlight.cameratuner;
+
+import android.animation.ValueAnimator;
+import android.content.Context;
+import android.graphics.Canvas;
+import android.graphics.LinearGradient;
+import android.graphics.Paint;
+import android.graphics.Path;
+import android.graphics.RectF;
+import android.graphics.Shader;
+import android.view.MotionEvent;
+import android.view.VelocityTracker;
+import android.view.View;
+import android.view.ViewConfiguration;
+
+/**
+ * 液态玻璃导航栏（v3 · 单一数据源重构）  2026-10-26
+ *
+ * 【核心设计】
+ *   全类只有一个状态：scrollOffset（0.0 ~ 2.0，表示滚到第几页的哪个位置）
+ *
+ *   胶囊位置 = dp(PAD) + scrollOffset * tabWidth()
+ *   页面位置 = scrollOffset * pagerWidth
+ *
+ *   两者都是从同一个数算出来的 → 物理上不可能错位。
+ *
+ * 【动画】
+ *   动画只修改 scrollOffset，胶囊与页面同时跟随。
+ *   不存在"胶囊先动页面后动"的问题。
+ *
+ * 【交互】
+ *   拖动：手指位移 → 改变 scrollOffset → 页面与胶囊同步移动
+ *   松手：动画把 scrollOffset 吸附到最近的整数
+ *   点 tab：动画把 scrollOffset 移到目标整数
+ *   滑页面：pager 通知 scrollOffset 变化
+ */
+public class GlassNavView extends View {
+
+    public interface OnTabSelectedListener {
+        void onTabSelected(int index, boolean fromDrag);
+    }
+
+    /** 滚动进度回调：让外部（pager）跟随 */
+    public interface OnProgressListener {
+        void onProgressChanged(float offset);
+    }
+
+    private static final int TAB_COUNT = 3;
+
+    // ---------- 配色 ----------
+    private static final int C_GLASS_BODY  = 0xD9FFFFFF;
+    private static final int C_PILL        = 0xFFFFE8EF;
+    private static final int C_PILL_STROKE = 0x33E0567C;
+
+    private static final float PAD = 4f;
+
+    // ---------- 绘制工具 ----------
+    private final Paint bodyPaint  = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint edgePaint  = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint pillPaint  = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint sheenPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final RectF tmpRect    = new RectF();
+    private final Path clipPath    = new Path();
+
+    // ==================== 唯一状态 ====================
+    /** 滚动进度：0.0 = 第0页，1.0 = 第1页，2.0 = 第2页 */
+    private float scrollOffset = 0f;
+
+    /** 动画（只改 scrollOffset） */
+    private ValueAnimator offsetAnim;
+
+    /** 当前所在整数页（用于判断是否变化） */
+    private int currentIndex = 0;
+
+    // ---------- 拖动 ----------
+    private boolean dragging = false;
+    private boolean pointerDown = false;
+    private float downX = 0f;
+    private float dragStartOffset = 0f;
+    private float dragStartTouchX = 0f;
+    private float dragTotalMove = 0f;
+    private final int touchSlop;
+    private VelocityTracker tracker;
+
+    // ---------- 流光 ----------
+    private float sheenPos = 1.5f;
+    private ValueAnimator sheenAnim;
+
+    private OnTabSelectedListener listener;
+    private OnProgressListener progressListener;
+    private final float density;
+
+    public GlassNavView(Context c) {
+        super(c);
+        density = getResources().getDisplayMetrics().density;
+        touchSlop = ViewConfiguration.get(c).getScaledTouchSlop();
+        setWillNotDraw(false);
+        setClickable(true);
+        startSheen();
+    }
+
+    public void setOnTabSelectedListener(OnTabSelectedListener l) {
+        this.listener = l;
+    }
+
+    public void setOnProgressListener(OnProgressListener l) {
+        this.progressListener = l;
+    }
+
+    private float dp(float v) { return v * density; }
+
+    // ==================== 尺寸 ====================
+
+    private float tabWidth() {
+        float inner = getWidth() - dp(PAD) * 2;
+        return inner / TAB_COUNT;
+    }
+
+    // ==================== 对外接口 ====================
+
+    /** 切到指定页（带动画） */
+    public void setCurrentIndex(int index, boolean animate) {
+        if (index < 0 || index >= TAB_COUNT) return;
+        currentIndex = index;
+        animateToOffset(index, animate);
+    }
+
+    /** 外部滚动（比如手指滑 pager）时同步 */
+    public void setScrollOffset(float offset) {
+        if (offset < 0f) offset = 0f;
+        if (offset > TAB_COUNT - 1) offset = TAB_COUNT - 1;
+        if (Math.abs(offset - scrollOffset) < 0.005f) return;
+        scrollOffset = offset;
+        currentIndex = Math.round(offset);
+        invalidate();
+    }
+
+    public float getScrollOffset() { return scrollOffset; }
+
+    public int getCurrentIndex() { return currentIndex; }
+
+    /** 动画滚动到目标偏移 */
+    private void animateToOffset(float target, boolean animate) {
+        if (offsetAnim != null) {
+            offsetAnim.cancel();
+            offsetAnim = null;
+        }
+
+        if (!animate || Math.abs(target - scrollOffset) < 0.001f) {
+            scrollOffset = target;
+            notifyProgressFinal();
+            invalidate();
+            return;
+        }
+
+        ValueAnimator a = ValueAnimator.ofFloat(scrollOffset, target);
+        a.setDuration(360);
+        a.setInterpolator(new android.view.animation.DecelerateInterpolator(1.6f));
+        a.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+            public void onAnimationUpdate(ValueAnimator anim) {
+                scrollOffset = (Float) anim.getAnimatedValue();
+                // 动画过程中不驱动页面（避免每帧 scrollTo 触发重排）
+                invalidate();
+            }
+        });
+        a.addListener(new android.animation.AnimatorListenerAdapter() {
+            public void onAnimationEnd(android.animation.Animator anim) {
+                notifyProgressFinal();
+                // 动画结束：确保文字状态与页面一致
+                if (listener != null) {
+                    final int idx = Math.round(scrollOffset);
+                    post(new Runnable() {
+                        public void run() {
+                            if (listener != null) listener.onTabSelected(idx, false);
+                        }
+                    });
+                }
+            }
+        });
+        offsetAnim = a;
+        a.start();
+    }
+
+    private void notifyProgress() {
+        if (progressListener != null) progressListener.onProgressChanged(scrollOffset);
+    }
+
+    /** 只在关键时刻通知一次（动画结束、立即到位），避免每帧驱动页面 */
+    private void notifyProgressFinal() {
+        if (progressListener != null) progressListener.onProgressChanged(Math.round(scrollOffset));
+    }
+
+    // ==================== 流光 ====================
+
+    private void startSheen() {
+        if (sheenAnim != null) sheenAnim.cancel();
+        sheenAnim = ValueAnimator.ofFloat(1.4f, -0.5f);
+        sheenAnim.setDuration(7000);
+        sheenAnim.setStartDelay(1800);
+        sheenAnim.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+            public void onAnimationUpdate(ValueAnimator a) {
+                sheenPos = (Float) a.getAnimatedValue();
+                invalidate();
+            }
+        });
+        sheenAnim.start();
+        postDelayed(new Runnable() {
+            public void run() { startSheen(); }
+        }, 7000 + 1800 + 9000);
+    }
+
+    // ==================== 绘制 ====================
+
+    @Override
+    protected void onDraw(Canvas canvas) {
+        float w = getWidth();
+        float h = getHeight();
+        if (w <= 0 || h <= 0) return;
+
+        float r = h / 2f;
+
+        // 1) 玻璃主体
+        tmpRect.set(0, 0, w, h);
+        bodyPaint.setStyle(Paint.Style.FILL);
+        bodyPaint.setColor(C_GLASS_BODY);
+        canvas.drawRoundRect(tmpRect, r, r, bodyPaint);
+
+        // 2) 五层边缘光
+        drawGlassEdges(canvas, w, h, r);
+
+        // 3) 流光
+        drawSheen(canvas, w, h);
+
+        // 4) 胶囊 —— 位置从 scrollOffset 现算，不存状态
+        if (tabWidth() > 0) {
+            float pillLeft = dp(PAD) + scrollOffset * tabWidth();
+            drawPill(canvas, h, pillLeft, tabWidth());
+        }
+    }
+
+    private void drawGlassEdges(Canvas canvas, float w, float h, float r) {
+        edgePaint.setStyle(Paint.Style.STROKE);
+
+        edgePaint.setStrokeWidth(dp(1.6f));
+        edgePaint.setColor(0xCCFFFFFF);
+        tmpRect.set(dp(0.8f), dp(0.8f), w - dp(0.8f), h - dp(0.8f));
+        canvas.drawRoundRect(tmpRect, r, r, edgePaint);
+
+        edgePaint.setStrokeWidth(dp(0.8f));
+        edgePaint.setColor(0xE6FFFFFF);
+        tmpRect.set(dp(1.6f), dp(1.6f), w - dp(1.6f), h - dp(1.6f));
+        canvas.drawRoundRect(tmpRect, r, r, edgePaint);
+
+        edgePaint.setStrokeWidth(dp(0.8f));
+        edgePaint.setColor(0x40B090B8);
+        tmpRect.set(dp(0.4f), dp(0.4f), w - dp(0.4f), h - dp(0.4f));
+        canvas.drawRoundRect(tmpRect, r, r, edgePaint);
+
+        edgePaint.setStrokeWidth(dp(1.2f));
+        edgePaint.setColor(0x14000000);
+        canvas.drawLine(dp(8), h - dp(1.2f), w - dp(8), h - dp(1.2f), edgePaint);
+    }
+
+    private void drawSheen(Canvas canvas, float w, float h) {
+        float bandCenter = sheenPos * w;
+        float half = w * 0.28f;
+
+        sheenPaint.setShader(new LinearGradient(
+                bandCenter - half, 0, bandCenter + half, 0,
+                new int[]{0x00FFFFFF, 0x26FFFFFF, 0x66FFFFFF, 0x26FFFFFF, 0x00FFFFFF},
+                new float[]{0f, 0.3f, 0.5f, 0.7f, 1f},
+                Shader.TileMode.CLAMP));
+        sheenPaint.setStyle(Paint.Style.FILL);
+
+        canvas.save();
+        float r = h / 2f;
+        clipPath.reset();
+        tmpRect.set(0, 0, w, h);
+        clipPath.addRoundRect(tmpRect, r, r, Path.Direction.CW);
+        canvas.clipPath(clipPath);
+        canvas.drawRect(0, 0, w, h, sheenPaint);
+        canvas.restore();
+
+        sheenPaint.setShader(null);
+    }
+
+    private void drawPill(Canvas canvas, float h, float pillLeft, float pillWidth) {
+        float top = dp(PAD);
+        float bottom = h - dp(PAD);
+        float pyr = (bottom - top) / 2f;
+
+        // 柔影
+        pillPaint.setStyle(Paint.Style.FILL);
+        pillPaint.setColor(0x14E0567C);
+        tmpRect.set(pillLeft - dp(1), top - dp(1), pillLeft + pillWidth + dp(1), bottom + dp(1));
+        canvas.drawRoundRect(tmpRect, pyr + dp(1), pyr + dp(1), pillPaint);
+
+        // 主体
+        pillPaint.setColor(C_PILL);
+        tmpRect.set(pillLeft, top, pillLeft + pillWidth, bottom);
+        canvas.drawRoundRect(tmpRect, pyr, pyr, pillPaint);
+
+        // 内高光
+        pillPaint.setStyle(Paint.Style.STROKE);
+        pillPaint.setStrokeWidth(dp(1f));
+        pillPaint.setColor(0x80FFFFFF);
+        tmpRect.set(pillLeft + dp(0.5f), top + dp(0.5f),
+                pillLeft + pillWidth - dp(0.5f), bottom - dp(0.5f));
+        canvas.drawRoundRect(tmpRect, pyr, pyr, pillPaint);
+
+        // 描边
+        pillPaint.setStrokeWidth(dp(0.8f));
+        pillPaint.setColor(C_PILL_STROKE);
+        tmpRect.set(pillLeft, top, pillLeft + pillWidth, bottom);
+        canvas.drawRoundRect(tmpRect, pyr, pyr, pillPaint);
+    }
+
+    // ==================== 触摸 ====================
+
+    @Override
+    public boolean onTouchEvent(MotionEvent ev) {
+        float tw = tabWidth();
+        if (tw <= 0) return super.onTouchEvent(ev);
+
+        switch (ev.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN: {
+                downX = ev.getX();
+                pointerDown = true;
+                dragging = false;
+                dragTotalMove = 0f;
+                dragStartOffset = scrollOffset;
+                dragStartTouchX = downX;
+
+                // 按下时打断动画（用户接管）
+                if (offsetAnim != null) {
+                    offsetAnim.cancel();
+                    offsetAnim = null;
+                }
+
+                if (tracker == null) tracker = VelocityTracker.obtain();
+                tracker.clear();
+                tracker.addMovement(ev);
+                return true;
+            }
+
+            case MotionEvent.ACTION_MOVE: {
+                if (!pointerDown) break;
+                if (tracker != null) tracker.addMovement(ev);
+
+                float total = Math.abs(ev.getX() - downX);
+                if (total > dragTotalMove) dragTotalMove = total;
+
+                if (!dragging) {
+                    if (total < touchSlop) return true;
+                    dragging = true;
+                    dragStartOffset = scrollOffset;
+                    dragStartTouchX = ev.getX();
+                    return true;
+                }
+
+                // 位移 → 偏移：手指移动一个 tab 宽 = 翻一页
+                float delta = ev.getX() - dragStartTouchX;
+                float newOffset = dragStartOffset + delta / tw;
+
+                if (newOffset < 0f) newOffset = 0f;
+                if (newOffset > TAB_COUNT - 1) newOffset = TAB_COUNT - 1;
+
+                scrollOffset = newOffset;
+                // 拖动过程中不驱动页面：每帧 scrollTo 会触发子 View 重新布局，
+                // 主线程被占满导致后续触摸事件丢失（表现为"点不动"）。
+                // 松手后统一让页面跟上。
+                invalidate();
+                return true;
+            }
+
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL: {
+                pointerDown = false;
+                if (tracker != null) {
+                    tracker.recycle();
+                    tracker = null;
+                }
+
+                // 位移极小 → 判为点击
+                if (!dragging || dragTotalMove < dp(4)) {
+                    final int idx = indexAt(ev.getX());
+                    currentIndex = idx;
+                    animateToOffset(idx, true);
+                    if (listener != null) {
+                        final boolean changed = true;
+                        post(new Runnable() {
+                            public void run() {
+                                if (listener != null) listener.onTabSelected(idx, false);
+                            }
+                        });
+                    }
+                    dragging = false;
+                    return true;
+                }
+
+                // 拖动结束：吸附到最近整数
+                int nearest = Math.round(scrollOffset);
+                if (nearest < 0) nearest = 0;
+                if (nearest >= TAB_COUNT) nearest = TAB_COUNT - 1;
+                currentIndex = nearest;
+                animateToOffset(nearest, true);
+                dragging = false;
+
+                // 无论是否变化都通知：让外部把文字/页面状态刷到一致
+                if (listener != null) {
+                    final int n = nearest;
+                    post(new Runnable() {
+                        public void run() {
+                            if (listener != null) listener.onTabSelected(n, true);
+                        }
+                    });
+                }
+                return true;
+            }
+        }
+        return super.onTouchEvent(ev);
+    }
+
+    private int indexAt(float x) {
+        float tw = tabWidth();
+        if (tw <= 0) return 0;
+        int idx = (int) ((x - dp(PAD)) / tw);
+        if (idx < 0) idx = 0;
+        if (idx >= TAB_COUNT) idx = TAB_COUNT - 1;
+        return idx;
+    }
+}

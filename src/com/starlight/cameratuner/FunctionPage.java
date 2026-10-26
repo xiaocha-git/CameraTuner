@@ -23,18 +23,21 @@ public class FunctionPage {
 
     ScrollView build() {
         ScrollView sv = new ScrollView(a);
-        sv.setBackgroundColor(MainActivity.C_BG);
+        Ui.customScrollbar(a, sv);
+        sv.setBackgroundColor(0x00000000);
         sv.setClipToPadding(false);
 
         LinearLayout c = new LinearLayout(a);
         c.setOrientation(LinearLayout.VERTICAL);
-        c.setPadding(a.dp(16), a.dp(8), a.dp(16), a.dp(140));
+        c.setPadding(a.dp(16), a.getStatusBarHeight() + a.dp(8), a.dp(16), a.dp(100));
 
         c.addView(Ui.pageTitle(a, "功能"));
 
         // 核心功能
-        c.addView(Ui.sectionLabel(a, "核心功能"));
+        c.addView(Ui.firstSectionLabel(a, "核心功能"));
         LinearLayout card1 = Ui.card(a);
+        addZoomPresetRow(a, card1);
+        Ui.divider(a, card1);
         Ui.switchRow(a, card1, "fake.enable", "机型伪装",
                 "让相机认为自己是 18 Pro Max (madrid)", R.drawable.ic_phone, switches);
         Ui.divider(a, card1);
@@ -46,13 +49,23 @@ public class FunctionPage {
         Ui.divider(a, card1);
         Ui.switchRow(a, card1, "opengate.enable", "片门全开",
                 "专业录像可输出 4096×3072 全画幅", R.drawable.ic_film, switches);
+        Ui.divider(a, card1);
+        Ui.switchRow(a, card1, "tilt.switch", "移轴开关",
+                "在相机左上角显示移轴悬浮开关（圆形/平行）", R.drawable.ic_tilt, switches);
+        Ui.divider(a, card1);
+        Ui.switchRow(a, card1, "live.supertele", "动态照片 + 超级长焦",
+                "开着超级长焦也能拍动态照片，两者不再互斥", R.drawable.ic_livephoto, switches);
+        Ui.divider(a, card1);
+        Ui.switchRow(a, card1, "tone.fix", "调色盘成片修复",
+                "让「原图」档的色盘参数真正作用到成片，不再只有预览生效",
+                R.drawable.ic_tone, switches);
         c.addView(card1);
 
         // 传奇色彩
         c.addView(Ui.sectionLabel(a, "传奇色彩"));
         LinearLayout cardColor = Ui.card(a);
         Ui.switchRow(a, cardColor, "legend.color", "色彩模拟",
-                "让传奇一瞬正常出片", R.drawable.ic_film, switches);
+                "让传奇一瞬正常出片", R.drawable.ic_color, switches);
         Ui.divider(a, cardColor);
         addLegendFilterRows(a, cardColor);
         c.addView(cardColor);
@@ -86,7 +99,7 @@ public class FunctionPage {
         LinearLayout cardZ = Ui.card(a);
         // ── 重映射组 ──
         Ui.switchRow(a, cardZ, "zoom.enable", "焦段重映射",
-                "若已安装 XiaomiCamPort，请关闭此项以免冲突", R.drawable.ic_film, switches);
+                "若已安装 XiaomiCamPort，请关闭此项以免冲突", R.drawable.ic_zoom, switches);
         Ui.divider(a, cardZ);
         Ui.editRow(a, cardZ, "zoom_remap", "档位重映射",
                 "格式：旧:新，逗号分隔。例：0.7:0.6,3.2:5,6.4:10", edits);
@@ -96,7 +109,7 @@ public class FunctionPage {
         // ── 循环组 ──
         Ui.divider(a, cardZ);
         Ui.switchRow(a, cardZ, "legend.zoomcycle", "档位循环修正",
-                "修复到最大档位后继续点击会乱跳的问题", R.drawable.ic_film, switches);
+                "修复到最大档位后继续点击会乱跳的问题", R.drawable.ic_loop, switches);
         Ui.divider(a, cardZ);
         Ui.editRow(a, cardZ, "legend.zoomcycle_stops", "循环档位表",
                 "格式：逗号分隔。例：5,10,20", edits);
@@ -107,7 +120,7 @@ public class FunctionPage {
         // ── 长焦组 ──
         Ui.divider(a, cardZ);
         Ui.switchRow(a, cardZ, "legend.prolens", "专业模式长焦修复",
-                "修复专业模式点 5x 无法调用长焦的问题", R.drawable.ic_film, switches);
+                "修复专业模式点 5x 无法调用长焦的问题", R.drawable.ic_tele, switches);
         Ui.divider(a, cardZ);
         Ui.editRow(a, cardZ, "legend.prolens_modes", "生效模式",
                 "默认 167（专业模式），一般无需修改", edits);
@@ -143,6 +156,7 @@ public class FunctionPage {
         Ui.divider(a, cardAdv);
         Ui.editRow(a, cardAdv, "prolens.idx_ultra", "超广角镜头索引",
                 "超广角默认 0。一般无需修改。", edits);
+
         c.addView(cardAdv);
 
 
@@ -157,7 +171,14 @@ public class FunctionPage {
             final String key = e.getKey();
             final CapsuleSwitch sw = e.getValue();
             String v = conf.get(key);
-            boolean on = v == null || "1".equals(v) || "true".equalsIgnoreCase(v);
+            // 新增功能默认关闭：键缺失时视为「关」，避免升级用户被强推
+            boolean on;
+            if ("live.supertele".equals(key) || "tilt.switch".equals(key)
+                    || "caps.force".equals(key)) {
+                on = v != null && ("1".equals(v) || "true".equalsIgnoreCase(v));
+            } else {
+                on = v == null || "1".equals(v) || "true".equalsIgnoreCase(v);
+            }
             sw.setCheckedImmediate(on);
             sw.setOnCheckedChangeListener(new CapsuleSwitch.OnCheckedChangeListener() {
                 public void onCheckedChanged(CapsuleSwitch s, boolean checked) {
@@ -220,6 +241,7 @@ public class FunctionPage {
         TunerDialog td = TunerDialog.create(a)
                 .title(key2)
                 .editable(a.readRawConfig(key2))
+                .negative("取消", null)
                 .positive("保存", new TunerDialog.OnAction() {
                     public void onClick(TunerDialog d) {
                         android.widget.EditText e = d.getEditText();
@@ -256,6 +278,333 @@ public class FunctionPage {
     }
 
 
+
+
+    /** 焦段预设选择行：一键填入对应机型的 zoom_remap（带右侧绿色状态胶囊） */
+    private void addZoomPresetRow(final MainActivity a, LinearLayout card) {
+        final java.util.Map<String, String> conf = a.readConfig();
+        final String curRemap = conf.get("zoom_remap");
+        final ZoomPresets.Preset detected = ZoomPresets.current();
+
+        // 判断当前已套用的是哪个预设：优先读 zoom.preset（设备代号），
+        // 老配置没有这个键时回退到按焦段值匹配。
+        final String curDrop = conf.get("zoom_drop");
+        ZoomPresets.Preset applied = ZoomPresets.byDevice(conf.get("zoom.preset"));
+        // 用户手动改过 zoom_remap 的话，记的预设就失效了
+        if (applied != null && !ZoomPresets.matchesBoth(curRemap, curDrop, applied)) {
+            applied = null;
+        }
+        if (applied == null && curRemap != null && !curRemap.trim().isEmpty()) {
+            for (ZoomPresets.Preset p : ZoomPresets.ALL) {
+                if (ZoomPresets.matchesBoth(curRemap, curDrop, p)) { applied = p; break; }
+            }
+        }
+
+        LinearLayout row = new LinearLayout(a);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        row.setPadding(a.dp(20), a.dp(16), a.dp(16), a.dp(16));
+
+        LinearLayout col = new LinearLayout(a);
+        col.setOrientation(LinearLayout.VERTICAL);
+        col.setLayoutParams(new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView t = new TextView(a);
+        t.setText("机型预设");
+        t.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 16);
+        t.setTextColor(MainActivity.C_TEXT_MAIN);
+        col.addView(t);
+
+        TextView d = new TextView(a);
+        String desc;
+        if (applied != null) {
+            desc = "已套用 " + applied.display + "，点击更换";
+        } else if (curRemap != null && !curRemap.trim().isEmpty()) {
+            desc = "当前为自定义焦段，点击选择预设";
+        } else if (detected != null) {
+            desc = "检测到 " + detected.display + "，点击套用";
+        } else {
+            desc = "选择机型，一键填入焦段映射";
+        }
+        d.setText(desc);
+        d.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 12);
+        d.setTextColor(MainActivity.C_TEXT_SUB);
+        d.setPadding(0, a.dp(3), 0, 0);
+        col.addView(d);
+
+        row.addView(col);
+
+        // 右侧绿色状态胶囊
+        if (applied != null || detected != null) {
+            ZoomPresets.Preset show = (applied != null) ? applied : detected;
+            boolean isApplied = (applied != null);
+
+            TextView chip = new TextView(a);
+            chip.setText(isApplied ? ("\u2713 " + show.display) : show.display);
+            chip.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 11);
+            android.graphics.drawable.GradientDrawable cb =
+                    new android.graphics.drawable.GradientDrawable();
+            if (isApplied) {
+                cb.setColor(0x1A34C759);       // 浅绿底
+                chip.setTextColor(0xFF1A9E45); // 绿字
+            } else {
+                cb.setColor(0x0D000000);       // 极淡灰底
+                chip.setTextColor(0xFF9A9A9E); // 灰字
+            }
+            cb.setCornerRadius(a.dp(9));
+            chip.setBackground(cb);
+            chip.setPadding(a.dp(9), a.dp(3), a.dp(9), a.dp(3));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT);
+            lp.leftMargin = a.dp(10);
+            chip.setLayoutParams(lp);
+            row.addView(chip);
+        }
+
+        row.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                showPresetDialog(a, detected);
+            }
+        });
+
+        card.addView(row);
+    }
+
+
+    /** 弹出预设选择列表（自绘，紧凑样式） */
+    private void showPresetDialog(final MainActivity a, final ZoomPresets.Preset detected) {
+        // 先算出当前配置实际套用的是哪个预设（优先 zoom.preset）
+        final java.util.Map<String, String> c0 = a.readConfig();
+        final String curRemap = c0.get("zoom_remap");
+        final String curDrop = c0.get("zoom_drop");
+        ZoomPresets.Preset applied = ZoomPresets.byDevice(c0.get("zoom.preset"));
+        if (applied != null && !ZoomPresets.matchesBoth(curRemap, curDrop, applied)) {
+            applied = null;
+        }
+        if (applied == null && curRemap != null && !curRemap.trim().isEmpty()) {
+            for (ZoomPresets.Preset p : ZoomPresets.ALL) {
+                if (ZoomPresets.matchesBoth(curRemap, curDrop, p)) { applied = p; break; }
+            }
+        }
+        final ZoomPresets.Preset appliedFinal = applied;
+
+        final android.app.Dialog dlg = new android.app.Dialog(a,
+                android.R.style.Theme_Translucent_NoTitleBar);
+        dlg.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
+
+        final int dp = a.dp(1);
+
+        LinearLayout root = new LinearLayout(a);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(a.dp(8), a.dp(18), a.dp(8), a.dp(10));
+
+        android.graphics.drawable.GradientDrawable bg =
+                new android.graphics.drawable.GradientDrawable();
+        bg.setColor(0xFFFFFFFF);
+        bg.setCornerRadius(a.dp(22));
+        root.setBackground(bg);
+
+        // 标题
+        TextView t = new TextView(a);
+        t.setText("选择机型预设");
+        t.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 17);
+        t.setTextColor(0xFF1C1C1E);
+        t.setTypeface(android.graphics.Typeface.create("sans-serif-medium",
+                android.graphics.Typeface.NORMAL));
+        t.setPadding(a.dp(14), 0, a.dp(14), a.dp(10));
+        root.addView(t);
+
+        // 提示
+        TextView hint = new TextView(a);
+        hint.setText("选中后自动填入焦段映射，可再手动修改");
+        hint.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 12);
+        hint.setTextColor(0xFF8E8E93);
+        hint.setPadding(a.dp(14), 0, a.dp(14), a.dp(8));
+        root.addView(hint);
+
+        // 滚动列表
+        ScrollView sv = new ScrollView(a);
+        Ui.customScrollbar(a, sv);
+        sv.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
+        LinearLayout list = new LinearLayout(a);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(0, a.dp(2), 0, a.dp(2));
+
+        for (int k = 0; k < ZoomPresets.ALL.length; k++) {
+            final ZoomPresets.Preset p = ZoomPresets.ALL[k];
+            final boolean isCur = (detected != null && detected == p);
+            final boolean isApplied = (appliedFinal != null && appliedFinal == p);
+
+            LinearLayout row = new LinearLayout(a);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            row.setPadding(a.dp(14), a.dp(13), a.dp(14), a.dp(13));
+
+            // 圆角背景：使用中 > 当前设备
+            android.graphics.drawable.GradientDrawable rbg =
+                    new android.graphics.drawable.GradientDrawable();
+            if (isApplied) {
+                rbg.setColor(0x1434C759);
+            } else if (isCur) {
+                rbg.setColor(0x14FF6B00);
+            } else {
+                rbg.setColor(0x00000000);
+            }
+            rbg.setCornerRadius(a.dp(12));
+            row.setBackground(rbg);
+
+            TextView name = new TextView(a);
+            name.setText(p.display);
+            name.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 15);
+            if (isApplied) {
+                name.setTextColor(0xFF1A9E45);
+                name.setTypeface(android.graphics.Typeface.create("sans-serif-medium",
+                        android.graphics.Typeface.NORMAL));
+            } else if (isCur) {
+                name.setTextColor(0xFFE85D00);
+                name.setTypeface(android.graphics.Typeface.create("sans-serif-medium",
+                        android.graphics.Typeface.NORMAL));
+            } else {
+                name.setTextColor(0xFF1C1C1E);
+            }
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+            name.setLayoutParams(lp);
+            row.addView(name);
+
+            // 右侧标记区（可能两个都有）
+            LinearLayout tags = new LinearLayout(a);
+            tags.setOrientation(LinearLayout.HORIZONTAL);
+            tags.setGravity(android.view.Gravity.CENTER_VERTICAL);
+
+            if (isCur) {
+                TextView c = new TextView(a);
+                c.setText("当前设备");
+                c.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 10);
+                c.setTextColor(0xFFE85D00);
+                android.graphics.drawable.GradientDrawable cb1 =
+                        new android.graphics.drawable.GradientDrawable();
+                cb1.setColor(0x1AE85D00);
+                cb1.setCornerRadius(a.dp(8));
+                c.setBackground(cb1);
+                c.setPadding(a.dp(7), a.dp(2), a.dp(7), a.dp(2));
+                tags.addView(c);
+            }
+
+            if (isApplied) {
+                TextView c2 = new TextView(a);
+                c2.setText("\u2713 使用中");
+                c2.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 10);
+                c2.setTextColor(0xFF1A9E45);
+                android.graphics.drawable.GradientDrawable cb2 =
+                        new android.graphics.drawable.GradientDrawable();
+                cb2.setColor(0x1A34C759);
+                cb2.setCornerRadius(a.dp(8));
+                c2.setBackground(cb2);
+                c2.setPadding(a.dp(7), a.dp(2), a.dp(7), a.dp(2));
+                LinearLayout.LayoutParams c2lp = new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT);
+                c2lp.leftMargin = a.dp(6);
+                c2.setLayoutParams(c2lp);
+                tags.addView(c2);
+            }
+
+            if (!isCur && !isApplied) {
+                // 都没标：显示焦段值
+                TextView tail = new TextView(a);
+                tail.setText(joinFloats(p.target));
+                tail.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 11);
+                tail.setTextColor(0xFFAEAEB2);
+                tags.addView(tail);
+            }
+
+            row.addView(tags);
+
+            final int idx = k;
+            row.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    dlg.dismiss();
+                    ZoomPresets.Preset sel = ZoomPresets.ALL[idx];
+                    a.writeConfig("zoom_remap", sel.toRemapString());
+                    a.writeConfig("zoom_drop", sel.toDropString());
+                    a.writeConfig("legend.zoomcycle_stops", sel.toCycleString());
+                    a.writeConfig("zoom.preset", sel.device);
+                    a.refreshCurrentPage();
+                    android.widget.Toast.makeText(a,
+                            "已套用 " + sel.display + " 焦段",
+                            android.widget.Toast.LENGTH_SHORT).show();
+                }
+            });
+            list.addView(row);
+        }
+
+        // 分隔 + 自定义
+        View line = new View(a);
+        line.setBackgroundColor(0x1A000000);
+        LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, a.dp(1));
+        llp.leftMargin = a.dp(14);
+        llp.rightMargin = a.dp(14);
+        llp.topMargin = a.dp(6);
+        llp.bottomMargin = a.dp(6);
+        line.setLayoutParams(llp);
+        list.addView(line);
+
+        LinearLayout custom = new LinearLayout(a);
+        custom.setOrientation(LinearLayout.VERTICAL);
+        custom.setPadding(a.dp(14), a.dp(12), a.dp(14), a.dp(12));
+        TextView cn = new TextView(a);
+        cn.setText("自定义");
+        cn.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 15);
+        cn.setTextColor(0xFF1C1C1E);
+        custom.addView(cn);
+        TextView cd = new TextView(a);
+        cd.setText("手动填写下方「档位重映射」，此处不改动");
+        cd.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 11);
+        cd.setTextColor(0xFF8E8E93);
+        custom.addView(cd);
+        custom.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { dlg.dismiss(); }
+        });
+        list.addView(custom);
+
+        sv.addView(list);
+        root.addView(sv);
+
+        dlg.setContentView(root);
+
+        android.view.Window w = dlg.getWindow();
+        if (w != null) {
+            w.setBackgroundDrawableResource(android.R.color.transparent);
+            // 背景遮罩（Translucent 主题不会自动加）
+            w.addFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            android.view.WindowManager.LayoutParams wlp = w.getAttributes();
+            wlp.dimAmount = 0.5f;
+            wlp.width = a.getResources().getDisplayMetrics().widthPixels - a.dp(48);
+            wlp.height = android.view.WindowManager.LayoutParams.WRAP_CONTENT;
+            w.setAttributes(wlp);
+            w.setDimAmount(0.5f);
+        }
+        dlg.show();
+    }
+
+    /** 把焦段数组拼成 "0.6 / 1 / 2 / 5 / 10" */
+    private static String joinFloats(float[] arr) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < arr.length; i++) {
+            if (i > 0) sb.append(" / ");
+            float v = arr[i];
+            if (Math.abs(v - Math.round(v)) < 0.0001f) {
+                sb.append((int) Math.round(v));
+            } else {
+                sb.append(v);
+            }
+        }
+        return sb.toString();
+    }
 
 
     /** 传奇一瞬三种风格对应的滤镜选择行 */

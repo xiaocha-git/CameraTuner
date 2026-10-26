@@ -1,7 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- 导演模式：摄像机。线条 2dp（与 ic_film 的场记板区分） -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp" android:height="24dp"
     android:viewportWidth="24" android:viewportHeight="24">
-    <path android:fillColor="#FF000000"
-        android:pathData="M20.2,3.2l0.6,2.2 -14.8,4 -0.6,-2.2 14.8,-4zM3.4,7.9l0.9,3.4 14.8,-4 -0.9,-3.4 -14.8,4zM2,12.5v8.5h20v-8.5H2zM10,14h4v5h-4v-5z"/>
+    <path
+        android:pathData="M13.5,6.5h-10a1.5,1.5 0 0,0 -1.5,1.5v8a1.5,1.5 0 0,0 1.5,1.5h10a1.5,1.5 0 0,0 1.5,-1.5V8a1.5,1.5 0 0,0 -1.5,-1.5z"
+        android:strokeColor="#FF000000"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:fillColor="#00000000" />
+    <path
+        android:pathData="M15,10.8l5.4,-3v8.4l-5.4,-3z"
+        android:strokeColor="#FF000000"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:fillColor="#00000000" />
 </vector>

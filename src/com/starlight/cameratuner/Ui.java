@@ -2,6 +2,7 @@ package com.starlight.cameratuner;
 
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.LayerDrawable;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
@@ -29,10 +30,11 @@ public class Ui {
             protected void onSizeChanged(int w, int h, int ow, int oh) {
                 super.onSizeChanged(w, h, ow, oh);
                 if (w > 0) {
+                    // 玫红 -> 紫 -> 蓝（对应 HTML 预览的 100deg 渐变）   #修改
                     gradient = new android.graphics.LinearGradient(
                             0, 0, w, 0,
-                            new int[]{0xFF5FA8C8, 0xFF8E7FC8, 0xFFC97FA8},
-                            new float[]{0f, 0.5f, 1f},
+                            new int[]{0xFFE0567C, 0xFFB96FD6, 0xFF6E9BE8},
+                            new float[]{0f, 0.52f, 1f},
                             android.graphics.Shader.TileMode.CLAMP);
                     getPaint().setShader(gradient);
                     invalidate();
@@ -47,7 +49,7 @@ public class Ui {
         };
         t.setText(text);
         t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 30);
-        t.setTextColor(0xFF5FA8C8);
+        t.setTextColor(0xFFE0567C);
         t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         wrap.addView(t);
         return wrap;
@@ -62,27 +64,68 @@ public class Ui {
         return t;
     }
 
+    /** 页面第一个分组标签：顶部间距更小，避免标题下方出现大片空白 */
+    static TextView firstSectionLabel(MainActivity a, String text) {
+        TextView t = new TextView(a);
+        t.setText(text);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        t.setTextColor(MainActivity.C_TEXT_SUB);
+        t.setPadding(a.dp(10), a.dp(6), 0, a.dp(10));
+        return t;
+    }
+
+    /** 应用统一的细玫红滚动条，替换系统默认样式 */
+    static void customScrollbar(MainActivity a, ScrollView sv) {
+        GradientDrawable thumb = new GradientDrawable();
+        thumb.setColor(0x45E0567C);
+        thumb.setCornerRadius(a.dp(4));
+        thumb.setSize(a.dp(3), a.dp(36));
+        sv.setVerticalScrollbarThumbDrawable(thumb);
+        sv.setScrollbarFadingEnabled(false);
+        sv.setScrollBarStyle(View.SCROLLBARS_INSIDE_OVERLAY);
+    }
+
     static ScrollView wrap(ScrollView sv) {
         return sv;
     }
 
     // ---------- 卡片 ----------
 
+    /**
+     * 玻璃卡片   #修改 2026-10-26
+     * 62% 半透明白 + 1dp 白色描边 + 淡阴影，让背景光斑透出来形成玻璃感。
+     * Java 里没有 backdrop-filter，这里用「半透明 + 描边 + 背景透出」模拟。
+     */
     static LinearLayout card(MainActivity a) {
         LinearLayout card = new LinearLayout(a);
         card.setOrientation(LinearLayout.VERTICAL);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(MainActivity.C_CARD);
-        bg.setCornerRadius(a.dp(20));
-        card.setBackground(bg);
-        card.setElevation(a.dp(1));
+
+        GradientDrawable glass = new GradientDrawable();
+        glass.setColor(MainActivity.C_GLASS);          // 62% 白
+        glass.setCornerRadius(a.dp(20));
+        glass.setStroke(a.dp(1), 0xB0FFFFFF);          // 56% 白描边
+
+        card.setBackground(glass);
+        card.setElevation(a.dp(2));
         card.setClipToOutline(true);
+        return card;
+    }
+
+    /** 强调卡片：带一层极淡的玫红到紫的渐变底（机型预设用）   #新增 */
+    static LinearLayout accentCard(MainActivity a) {
+        LinearLayout card = card(a);
+        GradientDrawable g = new GradientDrawable(
+                GradientDrawable.Orientation.TL_BR,
+                new int[]{0x1AE0567C, 0x14B96FD6});
+        g.setCornerRadius(a.dp(20));
+        g.setStroke(a.dp(1), 0xB0FFFFFF);
+        card.setBackground(g);
         return card;
     }
 
     static void divider(MainActivity a, LinearLayout card) {
         View v = new View(a);
-        v.setBackgroundColor(0xFFEDEDF0);
+        v.setBackgroundColor(MainActivity.C_DIVIDER);  // #修改 半透明黑
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, a.dp(1));
         lp.leftMargin = a.dp(20);
@@ -161,7 +204,11 @@ public class Ui {
         card.addView(row);
     }
 
-    /** 开关行 */
+    /**
+     * 开关行   #修改 2026-10-26
+     * 图标默认灰紫，开关打开时才变玫红（原来全橙，一片糊）。
+     * 也用于「机型伪装」这种图标 + 开关的行。
+     */
     static void switchRow(MainActivity a, LinearLayout card, final String key,
                           String title, String desc, int iconRes,
                           final java.util.Map<String, CapsuleSwitch> registry) {
@@ -170,14 +217,17 @@ public class Ui {
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setPadding(a.dp(20), a.dp(14), a.dp(14), a.dp(14));
 
+        final ImageView iv;
         if (iconRes != 0) {
-            ImageView iv = new ImageView(a);
+            iv = new ImageView(a);
             iv.setImageResource(iconRes);
-            iv.setColorFilter(MainActivity.C_ACCENT);
+            iv.setColorFilter(MainActivity.C_ACCENT);   // 图标常驻玫红
             LinearLayout.LayoutParams ip = new LinearLayout.LayoutParams(a.dp(22), a.dp(22));
             ip.rightMargin = a.dp(14);
             iv.setLayoutParams(ip);
             row.addView(iv);
+        } else {
+            iv = null;
         }
 
         LinearLayout col = new LinearLayout(a);
@@ -195,8 +245,8 @@ public class Ui {
             TextView d = new TextView(a);
             d.setText(desc);
             d.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-            // 含"请勿"的说明用警告色
-            d.setTextColor(desc.contains("请勿") ? MainActivity.C_ACCENT : MainActivity.C_TEXT_SUB);
+            // 含"请勿"的说明用警示橙（不再用主色，避免和主色混淆）   #修改
+            d.setTextColor(desc.contains("请勿") ? MainActivity.C_ORANGE : MainActivity.C_TEXT_SUB);
             d.setPadding(0, a.dp(4), 0, 0);
             col.addView(d);
         }
@@ -206,6 +256,7 @@ public class Ui {
         sw.setAccentColor(MainActivity.C_ACCENT);
         LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(a.dp(52), a.dp(32));
         sw.setLayoutParams(sp);
+
         row.addView(sw);
         if (registry != null) registry.put(key, sw);
 
@@ -275,6 +326,7 @@ public class Ui {
                 .title(k)
                 .editable(current)
                 .singleLine()
+                .negative("取消", null)
                 .positive("保存", new TunerDialog.OnAction() {
                     public void onClick(TunerDialog d) {
                         android.widget.EditText e = d.getEditText();

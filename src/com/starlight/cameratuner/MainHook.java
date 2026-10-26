@@ -19,6 +19,8 @@ import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XC_MethodReplacement;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
+import de.robv.android.xposed.XposedBridge;
+import android.app.AndroidAppHelper;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
@@ -38,14 +40,14 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  * 本 hook：强制 Pe.b.h2() 返回 true，让水印数据正常构建。
  * 配置：aiwm.enable=1 开启，aiwm.enable=0 关闭
  *
- * 配置文件：/sdcard/LegendaryUnlock/config.conf
+ * 配置文件：/storage/emulated/0/CameraTuner/config.conf
  */
 public class MainHook implements IXposedHookLoadPackage {
 
     private static final String TAG = "CameraTuner";
     private static final String CAMERA_PKG = "com.android.camera";
-    private static final String CONF_PATH = "/sdcard/CameraTuner/config.conf";
-    private static final String STATUS_PATH = "/sdcard/CameraTuner/status.json";
+    private static final String CONF_PATH = "/storage/emulated/0/CameraTuner/config.conf";
+    private static final String STATUS_PATH = "/storage/emulated/0/CameraTuner/status.json";
     private int hookCount = 0;
 
     // 配置默认值
@@ -60,6 +62,49 @@ public class MainHook implements IXposedHookLoadPackage {
     private boolean cfgForceCaps = false;
     /** 原色风格：抬 l9.h.E2 闸门，让顶栏风格列表从 2 档变 3 档 */
     private boolean cfgCvNatural = false;
+    /**
+     * 调色盘成片修复（tone.fix，默认开）
+     *
+     * 【问题】原图档拖色盘，预览正常、成片无效。
+     *
+     * 【根因链】
+     * 1) 色盘只把 contrast/sat 等写进 EffectController 的 float 字段（P/L/M/O/N/K/I）；
+     * 2) 预览走 CandySDK 的 StyleAdjustEffect，直接读这些 float -> 正常；
+     * 3) 主图走 MIVIRenderTag -> 读 mToneEffectId / mToneDegree；
+     * 4) 但这两个值来自 EffectController.j / x，而它们只在 u0() 里被设置；
+     * 5) 色盘从不调 u0() -> j 保持默认无效值(0x2000200)、x=0
+     *    -> mToneDegree=0 -> 主图不渲染调色。
+     *
+     * 【修法】两个 hook：
+     * A. l9.h.z2(l9.g)Z 强制 true —— 15 Pro 的 HAL 无 isSupportCustomQuality，
+     *    否则 A2.a$a 里 H0.M=false，EffectController.c() 会把参数全部清零。
+     * B. MIVIRenderTag 构造前，用 EffectController.L(影调 contrast) 反推滑块值，
+     *    替相机调一次 u0()，让 j / x 被正确设置。
+     *
+     * 验证：toneId 33555712(无效) -> 917602(0xE0062)，toneDeg 0 -> 100，
+     *       mType 0x200 -> 0x204（多出 TONE_FILTER_BINARY=0x4），成片正常出效果。
+     */
+    private boolean cfgToneFix = true;
+    private static int sLastQVal = 9999;
+    private boolean cfgTiltSwitch = false;     // 移轴悬浮开关（默认关）
+    /**
+     * 闪光灯修复（实验性，默认关闭）
+     *
+     * 已知问题：18PM 相机在拍照时只发一轮 capture 请求，依赖 madrid 的 HAL
+     * 在同一轮里完成「预闪→测光→主闪」。15 Pro 的 HAL 不走这套，
+     * 结果是灯在曝光前就闪完，成片全黑。
+     *
+     * 已尝试均无效：改 FLASH_MODE / AE_MODE / vendor tag / 旁路 E1 / PRECAPTURE /
+     * setTorchMode 手动点灯（相机占用中报 MAX_CAMERAS_IN_USE）。
+     *
+     * 真正可行的方向需要接管拍照流程、手动发两轮请求（预闪 + 主闪），
+     * 超出模块能力范围，暂不实现。详细结论见 README。
+     */
+    private boolean cfgFlashFix = false;
+    /** 动态照片 x 超级长焦 共存（1=开启，默认 0） */
+    private boolean cfgLiveSupTele = false;
+    /** 日志过滤：为空=全部输出，否则只输出这些标签（如 tilt,zoom） */
+    private final Set<String> logFilter = new HashSet<>();
     private boolean cfgAiWm = true;         // AI水印闸门
     private boolean cfgOpenGate = true;     // 片门全开解锁
     private int cfgRawType = 0x10;          // RAW 回调类型：0=关闭, 0x11=启用MultiRawHdr
@@ -124,6 +169,12 @@ public class MainHook implements IXposedHookLoadPackage {
             hookCvTypeNatural(lp.classLoader);
         }
 
+        // 2.6 调色盘成片修复（能力门 + u0 注入）
+        if (cfgToneFix) {
+            hookToneFix(lp.classLoader);
+            hookToneInject(lp.classLoader);
+        }
+
         // 3. RAW 回调类型
         if (cfgRawType != 0) {
             hookRawCallbackType(lp.classLoader);
@@ -172,6 +223,11 @@ public class MainHook implements IXposedHookLoadPackage {
             hookProLensFix(lp.classLoader);
         }
 
+        // 11.5 闪光灯修复（拍照 TORCH→SINGLE）
+        if (cfgFlashFix) {
+            hookFlashFix(lp.classLoader);
+        }
+
         // 写入状态文件（供 App 读取）
         writeStatus();
 
@@ -187,6 +243,25 @@ public class MainHook implements IXposedHookLoadPackage {
             LegendaryColor.init(lp);
         } catch (Throwable t) {
             loge("LegendaryColor init 失败: " + t);
+        }
+
+        // 14. 移轴悬浮开关
+        try {
+            TiltSwitch.init(lp, cfgTiltSwitch, this);
+        } catch (Throwable t) {
+            loge("TiltSwitch init 失败: " + t);
+        }
+
+        // 15. 动态照片 x 超级长焦 共存
+        if (cfgLiveSupTele) {
+            try {
+                LiveSupTeleFix fix = new LiveSupTeleFix(this);
+                if (fix.install(lp.classLoader)) {
+                    countHook();
+                }
+            } catch (Throwable t) {
+                loge("LiveSupTeleFix init 失败: " + t);
+            }
         }
     }
 
@@ -317,6 +392,275 @@ public class MainHook implements IXposedHookLoadPackage {
             }
         } catch (Throwable t) {
             loge("[zoom] hook 失败: " + t);
+        }
+
+        // 快捷焦段条（ZoomRatioToggleView）单独一套数据，必须额外处理
+        hookZoomToggleView(cl);
+
+        // 其他档位数据源（对照 XiaomiCamPort ZoomProbe 的 hook 点）
+        hookZoomExtraSources(cl);
+    }
+
+    /**
+     * 补齐其他档位数据源。
+     *
+     * 依据 XiaomiCamPort 0.11.6 的 ZoomProbe，除 data.i.V 之外还有：
+     *   data.i.T(I,Z)[F        —— 真正的档位源（内部调 S(I) 取原始表）
+     *   A3.g.h                 —— 档位源变体
+     *   Il.d.d / Il.d          —— 档位源变体
+     *   xiaomi...ZoomRatioToggleView.setZoomArray —— 小米版快捷条
+     *
+     * 注意：camport 里还有一个 pl.c.d()，但该类在 6.8.002090.2 中已不存在（类名漂移）。
+     */
+    private void hookZoomExtraSources(ClassLoader cl) {
+        int ok = 0;
+
+        // ── data.i.T(I,Z)[F ：真正的档位源，改返回值 ──
+        try {
+            Class<?> iCls = XposedHelpers.findClassIfExists(
+                    "com.android.camera.data.data.i", cl);
+            if (iCls != null) {
+                XposedHelpers.findAndHookMethod(iCls, "T", int.class, boolean.class,
+                        new XC_MethodHook() {
+                            @Override
+                            protected void afterHookedMethod(MethodHookParam param) {
+                                Object r = param.getResult();
+                                if (!(r instanceof float[])) return;
+                                float[] out = applyZoomRules((float[]) r);
+                                if (out != null) param.setResult(out);
+                            }
+                        });
+                logi("[zoom] 已 hook i.T(I,Z)[F（真正档位源）");
+                ok++;
+            }
+        } catch (Throwable t) {
+            loge("[zoom] i.T hook 失败: " + t);
+        }
+
+        // ── 小米版快捷条 setZoomArray ──
+        try {
+            Class<?> miCls = XposedHelpers.findClassIfExists(
+                    "com.xiaomi.camera.features.zoom.ui.view.toggle.ZoomRatioToggleView", cl);
+            if (miCls != null) {
+                for (final Method m : miCls.getDeclaredMethods()) {
+                    if (!"setZoomArray".equals(m.getName())) continue;
+                    Class<?>[] pts = m.getParameterTypes();
+                    if (pts.length != 1 || pts[0] != float[].class) continue;
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            mapArrayArg(param, 0);
+                        }
+                    });
+                    logi("[zoom] 已 hook 小米版 ZoomRatioToggleView.setZoomArray([F)");
+                    ok++;
+                    break;
+                }
+            }
+        } catch (Throwable t) {
+            loge("[zoom] setZoomArray hook 失败: " + t);
+        }
+
+        // ── A3.g.h ：档位源变体 ──
+        ok += hookZoomSrcByScan(cl, "A3.g", "h");
+
+        // ── Il.d ：档位源变体 ──
+        ok += hookZoomSrcByScan(cl, "Il.d", "d");
+
+        if (ok > 0) {
+            hookCount += ok;
+        }
+        logi("[zoom] 额外档位源: 成功 " + ok + " 个");
+    }
+
+    /**
+     * 通用：在指定类里找「无参/单参 + 返回 float[]」的方法并 hook 返回值。
+     * 用于 A3.g.h、Il.d.d 这类混淆方法名。
+     */
+    private int hookZoomSrcByScan(ClassLoader cl, String className, String methodName) {
+        int n = 0;
+        try {
+            Class<?> c = XposedHelpers.findClassIfExists(className, cl);
+            if (c == null) {
+                logi("[zoom] 类不存在，跳过: " + className);
+                return 0;
+            }
+            for (final Method m : c.getDeclaredMethods()) {
+                if (!methodName.equals(m.getName())) continue;
+                if (m.getReturnType() != float[].class) continue;
+                if (m.getParameterTypes().length > 2) continue;
+
+                XposedBridge.hookMethod(m, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        Object r = param.getResult();
+                        if (!(r instanceof float[])) return;
+                        float[] out = applyZoomRules((float[]) r);
+                        if (out != null) param.setResult(out);
+                    }
+                });
+                logi("[zoom] 已 hook " + className + "." + methodName
+                        + "(" + m.getParameterTypes().length + "参)[F");
+                n++;
+            }
+        } catch (Throwable t) {
+            loge("[zoom] " + className + "." + methodName + " hook 失败: " + t);
+        }
+        return n;
+    }
+
+    /**
+     * 快捷焦段条（展开轮盘下方的 0.7 / 1 / 3.2 / 6.4 那一排）。
+     *
+     * 这个 View 不直接从 i.V() 取数，数组是从外部方法参数传进来的，
+     * 所以只 hook i.V()/F.k() 时，收起状态的胶囊正常，展开后的快捷条仍是原值。
+     *
+     * 做法：在所有接收/返回 float[] 的入口上，对数组元素套用同一套
+     *       重映射规则（applyZoomRules）。
+     *
+     * 参考点来自 XiaomiCamPort 0.11.6 的 ZoomProbe：
+     *   u([FZZZ)[F            -> 返回
+     *   v([FZZZZ)V            -> 参数0
+     *   V([FZZZLFrameLayout;I)V -> 参数0
+     *   g([F)V                -> 参数0（注意：此方法会反转数组，改完后不破坏其逻辑）
+     *   m(IIZZ)F              -> 返回值（按下标取倍率）
+     */
+    private void hookZoomToggleView(ClassLoader cl) {
+        try {
+            final Class<?> cls = XposedHelpers.findClassIfExists(
+                    "com.android.camera.ui.zoom.ZoomRatioToggleView", cl);
+            if (cls == null) {
+                loge("[zoom] 找不到 ZoomRatioToggleView，快捷条无法重映射");
+                return;
+            }
+
+            int ok = 0;
+
+            // ── u([FZZZ)[F ：返回数组 ──
+            try {
+                XposedHelpers.findAndHookMethod(cls, "u",
+                        float[].class, boolean.class, boolean.class, boolean.class,
+                        new XC_MethodHook() {
+                            @Override
+                            protected void afterHookedMethod(MethodHookParam param) {
+                                Object r = param.getResult();
+                                if (!(r instanceof float[])) return;
+                                float[] out = applyZoomRules((float[]) r);
+                                if (out != null) param.setResult(out);
+                            }
+                        });
+                logi("[zoom] 已 hook ZoomRatioToggleView.u([FZZZ)[F");
+                ok++;
+            } catch (Throwable t) {
+                loge("[zoom] u hook 失败: " + t);
+            }
+
+            // ── v([FZZZZ)V ：参数0 ──
+            try {
+                XposedHelpers.findAndHookMethod(cls, "v",
+                        float[].class, boolean.class, boolean.class,
+                        boolean.class, boolean.class,
+                        new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) {
+                                mapArrayArg(param, 0);
+                            }
+                        });
+                logi("[zoom] 已 hook ZoomRatioToggleView.v([FZZZZ)V");
+                ok++;
+            } catch (Throwable t) {
+                loge("[zoom] v hook 失败: " + t);
+            }
+
+            // ── V([FZZZLandroid/widget/FrameLayout;I)V ：参数0 ──
+            try {
+                XposedHelpers.findAndHookMethod(cls, "V",
+                        float[].class, boolean.class, boolean.class,
+                        boolean.class, android.widget.FrameLayout.class, int.class,
+                        new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) {
+                                mapArrayArg(param, 0);
+                            }
+                        });
+                logi("[zoom] 已 hook ZoomRatioToggleView.V([FZZZLFrameLayout;I)V");
+                ok++;
+            } catch (Throwable t) {
+                loge("[zoom] V hook 失败: " + t);
+            }
+
+            // ── g([F)V ：参数0（静态方法，内部会反转数组）──
+            try {
+                XposedHelpers.findAndHookMethod(cls, "g",
+                        float[].class,
+                        new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) {
+                                mapArrayArg(param, 0);
+                            }
+                        });
+                logi("[zoom] 已 hook ZoomRatioToggleView.g([F)V");
+                ok++;
+            } catch (Throwable t) {
+                loge("[zoom] g hook 失败: " + t);
+            }
+
+            // ── m(IIZZ)F ：返回倍率，按最终表取档 ──
+            try {
+                XposedHelpers.findAndHookMethod(cls, "m",
+                        int.class, int.class, boolean.class, boolean.class,
+                        new XC_MethodHook() {
+                            @Override
+                            protected void afterHookedMethod(MethodHookParam param) {
+                                try {
+                                    Object r = param.getResult();
+                                    if (!(r instanceof Float)) return;
+                                    float v = (Float) r;
+                                    Float nv = zoomRemap.get(v);
+                                    if (nv != null && Math.abs(nv - v) > 0.0001f) {
+                                        param.setResult(nv);
+                                        logi("[zoom] 快捷条倍率 " + v + " -> " + nv);
+                                    }
+                                } catch (Throwable t) {
+                                    loge("[zoom] m 处理失败: " + t);
+                                }
+                            }
+                        });
+                logi("[zoom] 已 hook ZoomRatioToggleView.m(IIZZ)F");
+                ok++;
+            } catch (Throwable t) {
+                loge("[zoom] m hook 失败: " + t);
+            }
+
+            hookCount += ok;
+            logi("[zoom] 快捷焦段条: 成功 " + ok + "/5");
+        } catch (Throwable t) {
+            loge("[zoom] hookZoomToggleView 失败: " + t);
+        }
+    }
+
+    /**
+     * 就地把第 idx 个参数（float[]）按 zoomRemap 改写。
+     * 注意：直接修改原数组，不换引用，避免与调用方共享引用时的意外。
+     */
+    private void mapArrayArg(XC_MethodHook.MethodHookParam param, int idx) {
+        try {
+            if (param.args.length <= idx) return;
+            Object a = param.args[idx];
+            if (!(a instanceof float[])) return;
+
+            float[] src = (float[]) a;
+            float[] out = applyZoomRules(src);
+            if (out == null) return;          // 无变化
+
+            // 长度不同说明有剔除，直接换引用
+            if (out.length != src.length) {
+                param.args[idx] = out;
+            } else {
+                System.arraycopy(out, 0, src, 0, out.length);
+            }
+        } catch (Throwable t) {
+            loge("[zoom] mapArrayArg 失败: " + t);
         }
     }
 
@@ -453,6 +797,115 @@ public class MainHook implements IXposedHookLoadPackage {
             loge("[telefix] hook 失败: " + t);
         }
     }
+
+    /**
+     * 闪光灯修复（flash.fix）
+     *
+     * 问题：18PM 相机在拍照（applyType=3/6）时，applyFlashMode 会把 final flashMode
+     *      无条件改成 2（FLASH_MODE_TORCH 常亮），依赖 HAL 自己在曝光瞬间转成闪光脉冲。
+     *      18 Pro Max 的 HAL 会转，15 Pro 的 HAL 不会 → 只闪一下、曝光时灯已灭。
+     *
+     * 修法：hook l9.z0.E1(int applyType, CaptureRequest.Builder) 的 after，
+     *      当 applyType 是 3/6 且用户确实选了「开(3)」时，把 Builder 里的
+     *      FLASH_MODE 从 TORCH(2) 改回 SINGLE(1)。
+     *
+     * 只改最终请求，不动相机内部状态，出错也只影响这一帧。
+     */
+    private static volatile android.hardware.camera2.CameraManager sCamMgr;
+    private static volatile String sCamId;
+    private static volatile long sTorchOffAt;
+
+    private void hookFlashFix(ClassLoader cl) {
+        try {
+            // ── 复刻微信的做法（依据：微信用 Camera2 能正常闪光）──
+            // 微信日志：CameraParametersCache: reqFlashMode: 0
+            //   → 它把 FLASH_MODE 设为 OFF(0)，不直接命令灯；
+            //   → 靠 CONTROL_AE_MODE 让 HAL 在曝光瞬间自己决定何时闪。
+            //
+            // 我们之前设 FLASH_MODE=SINGLE(1)，语义是"本次请求立刻闪一下"，
+            // 所以灯在按下快门那一刻就闪掉了，等曝光时已经灭了。
+            Class<?> z0;
+            try {
+                z0 = XposedHelpers.findClass("l9.z0", cl);
+            } catch (Throwable e) {
+                loge("[flash] 找不到 l9.z0: " + e);
+                return;
+            }
+
+            XposedHelpers.findAndHookMethod(z0, "E1", int.class,
+                    android.hardware.camera2.CaptureRequest.Builder.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            try {
+                                int applyType = (Integer) param.args[0];
+                                if (applyType != 3) return;   // 只在按下快门
+
+                                Object self = param.thisObject;
+                                Object bObj = param.args[1];
+                                if (self == null || !(bObj instanceof android.hardware.camera2.CaptureRequest.Builder)) return;
+
+                                Object i0 = XposedHelpers.getObjectField(self, "E");
+                                Object j0 = XposedHelpers.getObjectField(i0, "a");
+                                int pref = XposedHelpers.getIntField(j0, "j0");
+                                if (pref != 1) return;   // 只在「开」
+
+                                Object previewBuilder = XposedHelpers.getObjectField(self, "z");
+                                boolean isPreview = (bObj == previewBuilder);
+                                if (isPreview) return;   // 预览不动
+
+                                android.hardware.camera2.CaptureRequest.Builder b =
+                                        (android.hardware.camera2.CaptureRequest.Builder) bObj;
+
+                                // 微信的做法：FLASH_MODE=OFF，AE_MODE 让它自己闪
+                                b.set(android.hardware.camera2.CaptureRequest.FLASH_MODE, 0);
+                                b.set(android.hardware.camera2.CaptureRequest.CONTROL_AE_MODE, 3);
+
+                                loge("[flash] 拍照: FLASH_MODE=0(OFF) + AE_MODE=3");
+                            } catch (Throwable t) {
+                                loge("[flash] 失败: " + t);
+                            }
+                        }
+                    });
+            countHook();
+            loge("[flash] 已 hook l9.z0.E1（微信方案：FLASH_MODE=0 + AE_MODE=3）");
+        } catch (Throwable t) {
+            loge("[flash] hook 失败: " + t);
+        }
+    }
+
+
+    /** 自己创建 CameraManager；cameraId 依次试 0/1/2 */
+    private void ensureCamMgr(Object self) {
+        if (sCamMgr != null) return;
+        try {
+            android.content.Context ctx = AndroidAppHelper.currentApplication();
+            if (ctx == null) {
+                loge("[flash] currentApplication 为 null");
+                return;
+            }
+            sCamMgr = (android.hardware.camera2.CameraManager)
+                    ctx.getSystemService(android.content.Context.CAMERA_SERVICE);
+            if (sCamMgr != null) {
+                try {
+                    sCamId = sCamMgr.getCameraIdList()[0];
+                } catch (Throwable t) {
+                    sCamId = "0";
+                }
+            }
+            loge("[flash] CameraManager=" + (sCamMgr != null) + " cameraId=" + sCamId);
+        } catch (Throwable t) {
+            loge("[flash] ensureCamMgr 失败: " + t);
+        }
+    }
+
+
+
+
+
+
+
+
 
     /** 对档位数组应用重映射 + 剔除 */
     private float[] applyZoomRules(float[] src) {
@@ -1010,6 +1463,74 @@ public class MainHook implements IXposedHookLoadPackage {
      * 强制 true 后，顶栏风格列表从 [生动/经典] 变成 [原色/生动/经典]。
      * 三档对应的 updateCvType 值：0=原色 1=生动 2=经典。
      */
+    /**
+     * 调色盘修复：抬 l9.h.z2(l9.g)Z 能力门。
+     *
+     * 链：z2 -> false  =>  H0.M=false  =>  EffectController.c() 清零
+     *     =>  MIVIRenderTag 不生成 StyleAdjustEffect  =>  成片无调色
+     * 强制 true 后参数会照常下发到 HAL。
+     *
+     * 注意类名漂移：源码里叫 l9.h，2090 里实际是 l9.1.h.1。
+     */
+    private void hookToneFix(ClassLoader cl) {
+        String[] candidates = {"l9.h", "l9.1.h.1"};
+        for (String cn : candidates) {
+            if (hookCapsMethod(cn, "z2", cl)) {
+                loge("[tone] " + cn + ".z2 -> true（调色盘成片已解锁）");
+                return;
+            }
+        }
+        loge("[tone] l9.h.z2 全部候选类都没 hook 上");
+    }
+
+    /**
+     * 替相机补调 u0()：色盘只写 float 参数，从不调 u0，
+     * 导致 j(影调id) 和 x(影调degree) 一直是默认/0，
+     * MIVIRenderTag 拿到的 mToneEffectId 无效、mToneDegree=0，主图就不出效果。
+     *
+     * 这里在 MIVIRenderTag 构造前，用 EffectController.L(contrast) 反推影调值，
+     * 主动调一次 u0()，让相机自己把 id/degree 算对。
+     */
+    private void hookToneInject(ClassLoader cl) {
+        try {
+            final Class<?> tagCls = XposedHelpers.findClassIfExists(
+                    "com.xiaomi.camera.mivi.filter.MIVIRenderTag", cl);
+            if (tagCls == null) {
+                loge("[tone] 找不到 MIVIRenderTag");
+                return;
+            }
+            // 在构造函数之前补调 u0
+            for (java.lang.reflect.Constructor<?> ctor : tagCls.getDeclaredConstructors()) {
+                XposedBridge.hookMethod(ctor, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        try {
+                            Object ec = XposedHelpers.callStaticMethod(
+                                    XposedHelpers.findClass(
+                                            "com.xiaomi.camera.effect.EffectController", cl),
+                                    "u");
+                            if (ec == null) return;
+                            float contrast = XposedHelpers.getFloatField(ec, "L");
+                            if (Math.abs(contrast) < 0.001f) return;
+                            int toneVal = Math.round(contrast * 100f);
+                            XposedHelpers.callMethod(ec, "u0", toneVal);
+                            int jv = XposedHelpers.getIntField(ec, "j");
+                            int xv = XposedHelpers.getIntField(ec, "x");
+                            loge("[tone] inject u0(" + toneVal + ") contrast=" + contrast
+                                    + " -> j=0x" + Integer.toHexString(jv)
+                                    + " x=" + xv);
+                        } catch (Throwable t) {
+                            loge("[tone] inject 失败: " + t);
+                        }
+                    }
+                });
+            }
+            loge("[tone] 影调注入已挂载");
+        } catch (Throwable t) {
+            loge("[tone] hookToneInject 失败: " + t);
+        }
+    }
+
     private void hookCvTypeNatural(ClassLoader cl) {
         if (hookCapsMethod("l9.h", "E2", cl)) {
             logi("[cvtype] l9.h.E2 -> true（原色风格已解锁）");
@@ -1229,7 +1750,7 @@ public class MainHook implements IXposedHookLoadPackage {
                   + "# log: 0=关 1=基本日志\n"
                   + "log=1\n"
                   + "\n"
-                  + "# ──────────────────────────────\n"
+                  + "# ------------------------------------\n"
                   + "# 机型伪装\n"
 
                   + "# 让相机认为自己是 18 Pro Max (madrid)\n"
@@ -1242,28 +1763,54 @@ public class MainHook implements IXposedHookLoadPackage {
                   + "fake.model=2611FPNFAG\n"
                   + "fake.product=madrid\n"
                   + "\n"
-                  + "# ──────────────────────────────\n"
+                  + "# ------------------------------------\n"
                   + "# 传奇一瞬\n"
 
                   + "caps.force=0\n"
                   + "# 原色风格：解锁顶栏第三档「原色」（0=关 1=开）\n"
                   + "cvtype.natural=0\n"
+                  + "# 调色盘成片修复（1=开 0=关）\n"
+                  + "# 让「原图」档的色盘/参数真正作用到成片。\n"
+                  + "# 原理：①抬 l9.h.z2 能力门（15 Pro HAL 无 isSupportCustomQuality，\n"
+                  + "#          否则 EffectController 会把调色参数清零，只有预览生效）；\n"
+                  + "#       ②拍照前替相机调 u0()，补齐影调 id/强度（色盘自己不调）。\n"
+                  + "tone.fix=1\n"
+                  + "\n"
+                  + "# 移轴悬浮开关（1=显示左上角悬浮开关，0=不显示）\n"
+                  + "tilt.switch=0\n"
+                  + "\n"
+                  + "# 闪光灯修复【实验性·已知无效，默认关闭】\n"
+                  + "# 18PM 相机一轮请求里完成全部闪光逻辑，15 Pro 的 HAL 需要两轮，\n"
+                  + "# 结果是闪完才曝光 → 成片黑。此开关的几种尝试均未解决，仅作记录。\n"
+                  + "# 0=关（默认）  1=开（实验）\n"
+                  + "flash.fix=0\n"
+                  + "\n"
+                  + "# 动态照片 x 超级长焦 共存\n"
+                  + "# 18PM 相机默认让超级长焦临时互斥掉动态照片（按钮变灰）。\n"
+                  + "# 开启后按钮保持可用，两路流在 HAL 层是否冲突需实拍验证。\n"
+                  + "# 0=关（默认）  1=开\n"
+                  + "live.supertele=0\n"
+                  + "\n"
+                  + "# 日志过滤：留空=全部输出；填标签则只输出这些（逗号分隔）\n"
+                  + "# 可用标签: tilt, zoom, cycle, telefix, caps, cvtype, aiwm, og,\n"
+                  + "#           raw, rawfield, rawsize, opmode, mode, blockmsg, wm, level, live\n"
+                  + "log.filter=\n"
                   + "level=2\n"
                   + "raw.type=0x10\n"
                   + "\n"
-                  + "# ──────────────────────────────\n"
+                  + "# ------------------------------------\n"
                   + "# AI 水印\n"
 
                   + "# 绕过机型限制，让 AI 水印不崩\n"
                   + "aiwm.enable=1\n"
                   + "\n"
-                  + "# ──────────────────────────────\n"
+                  + "# ------------------------------------\n"
                   + "# 片门全开\n"
 
                   + "# 专业录像可输出 4096x3072 全画幅\n"
                   + "opengate.enable=1\n"
                   + "\n"
-                  + "# ──────────────────────────────\n"
+                  + "# ------------------------------------\n"
                   + "# 焦段重映射\n"
 
                   + "# 若已安装 XiaomiCamPort，请设为 0 以免冲突\n"
@@ -1271,10 +1818,13 @@ public class MainHook implements IXposedHookLoadPackage {
                   + "# 格式：旧:新，逗号分隔\n"
                   + "# 15 Pro (haotian) 推荐值：\n"
                   + "zoom_remap=0.7:0.6,3.2:5.0,6.4:10.0\n"
+                  + "# 记忆当前套用的机型预设（设备代号，如 haotian），空=自定义。\n"
+                  + "# 同焦段的机型靠这个区分，一般不手动改。\n"
+                  + "zoom.preset=\n"
                   + "# 档位剔除（这些档位会被移除，逗号分隔）\n"
                   + "zoom_drop=4.3\n"
                   + "\n"
-                  + "# ──────────────────────────────\n"
+                  + "# ------------------------------------\n"
                   + "# 档位循环修正\n"
 
                   + "# 修复「到最大档后继续点击会乱跳」的问题\n"
@@ -1286,7 +1836,7 @@ public class MainHook implements IXposedHookLoadPackage {
                   + "# 循环档位表\n"
                   + "legend.zoomcycle_stops=5,10,20\n"
                   + "\n"
-                  + "# ──────────────────────────────\n"
+                  + "# ------------------------------------\n"
                   + "# 专业模式长焦修复\n"
 
                   + "# 修专业模式(167)点 5x 调用不到长焦的问题\n"
@@ -1297,7 +1847,7 @@ public class MainHook implements IXposedHookLoadPackage {
                   + "prolens.idx_wide=1\n"
                   + "prolens.idx_ultra=0\n"
                   + "\n"
-                  + "# ──────────────────────────────\n"
+                  + "# ------------------------------------\n"
                   + "# 模式可见性\n"
 
                   + "# 可写多行\n"
@@ -1306,7 +1856,7 @@ public class MainHook implements IXposedHookLoadPackage {
                   + "# enable_mode=com.android.camera.features.mode.cinemaster.CinemasterModuleEntry\n"
                   + "# disable_mode=com.android.camera.features.mode.cosmeticmirror.CosmeticMirrorModuleEntry\n"
                   + "\n"
-                  + "# ──────────────────────────────\n"
+                  + "# ------------------------------------\n"
                   + "# 智能构图（AI帮拍里那个点了没反应的按钮）\n"
                   + "# 0=关  1=抬U3  2=+比例门  3=+下发门  4=+兜底门\n"
                   + "# 5=只抬V3走v1  6=+F.w/isSwitchOn  7=+补齐v1三门\n"
@@ -1321,7 +1871,7 @@ public class MainHook implements IXposedHookLoadPackage {
                   + "# fragment debug TextView 放行（有 NPE 风险，默认关）\n"
                   + "ai.smartcomp.dbgfrag=0\n"
                   + "\n"
-                  + "# ──────────────────────────────\n"
+                  + "# ------------------------------------\n"
                   + "# 传奇一瞬色彩模拟（让传奇一瞬正常出片）\n"
                   + "# 18PM 的传奇色彩在 HAL 里，本机 HAL 没有，\n"
                   + "# 所以映射到相机自带的 CubeLut 滤镜管线\n"
@@ -1393,6 +1943,25 @@ public class MainHook implements IXposedHookLoadPackage {
                         break;
                     case "cvtype.natural":
                         cfgCvNatural = "1".equals(v) || "true".equalsIgnoreCase(v);
+                        break;
+                    case "tone.fix":
+                        cfgToneFix = "1".equals(v) || "true".equalsIgnoreCase(v);
+                        break;
+                    case "tilt.switch":
+                        cfgTiltSwitch = "1".equals(v) || "true".equalsIgnoreCase(v);
+                        break;
+                    case "flash.fix":
+                        cfgFlashFix = "1".equals(v) || "true".equalsIgnoreCase(v);
+                        break;
+                    case "live.supertele":
+                        cfgLiveSupTele = "1".equals(v) || "true".equalsIgnoreCase(v);
+                        break;
+                    case "log.filter":
+                        logFilter.clear();
+                        for (String x : v.split(",")) {
+                            String t = x.trim();
+                            if (!t.isEmpty()) logFilter.add(t);
+                        }
                         break;
                     case "aiwm.enable":
                         cfgAiWm = "1".equals(v) || "true".equalsIgnoreCase(v);
@@ -1531,13 +2100,32 @@ public class MainHook implements IXposedHookLoadPackage {
         if (f == null || !f.exists()) {
             return;
         }
+
+        // 补齐项：键、默认值、所属分组、说明
+        // 注意：enable_mode 这类"用户主动选择"的键不在补齐范围内——
+        // 程序不应替用户决定要显示哪个模式。
         final String[] keys = {
                 "legend.color", "legend.filter.m3", "legend.filter.m9",
                 "legend.filter.m10r", "legend.degree", "ai.smartcomp",
                 "ai.smartcomp.submit", "ai.smartcomp.dbgindex",
-                "ai.smartcomp.cycle", "ai.smartcomp.dbgfrag", "cvtype.natural"};
+                "ai.smartcomp.cycle", "ai.smartcomp.dbgfrag", "cvtype.natural",
+                "tone.fix"};
         final String[] vals = {
-                "1", "86", "84", "73", "100", "7", "1", "1", "0", "0", "0"};
+                "1", "86", "84", "73", "100", "7", "1", "1", "0", "0", "0",
+                "1"};
+        final String[] groups = {
+                "传奇色彩", "传奇色彩", "传奇色彩",
+                "传奇色彩", "传奇色彩", "智能构图",
+                "智能构图", "智能构图",
+                "智能构图", "智能构图", "核心功能",
+                "核心功能"};
+        final String[] notes = {
+                "传奇一瞬色彩模拟开关", "黑白胶片默认滤镜", "传奇CCD默认滤镜",
+                "当代经典默认滤镜", "滤镜强度 0-100", "智能构图档位 0-7",
+                "submitAiComposition 是否放行", "合成数据索引 1-48",
+                "每次合成后索引自增", "debug TextView 放行（有 NPE 风险）",
+                "原色风格：顶栏多一档「原色」",
+                "调色盘成片修复：让「原图」档的色盘参数真正作用到成片"};
 
         boolean[] present = new boolean[keys.length];
         try (BufferedReader br = new BufferedReader(new FileReader(f))) {
@@ -1557,19 +2145,28 @@ public class MainHook implements IXposedHookLoadPackage {
             return;
         }
 
+        // 按分组整理待补内容
         StringBuilder add = new StringBuilder();
+        String lastGroup = null;
+        int added = 0;
         for (int i = 0; i < keys.length; i++) {
-            if (!present[i]) {
-                add.append(keys[i]).append('=').append(vals[i]).append('\n');
+            if (present[i]) continue;
+            if (!groups[i].equals(lastGroup)) {
+                add.append("\n# ------------------------------------\n");
+                add.append("# ").append(groups[i]).append("\n");
+                lastGroup = groups[i];
             }
+            add.append("# ").append(notes[i]).append("\n");
+            add.append(keys[i]).append('=').append(vals[i]).append("\n");
+            added++;
         }
-        if (add.length() == 0) {
+        if (added == 0) {
             return;
         }
         try (java.io.FileWriter fw = new java.io.FileWriter(f, true)) {
-            fw.write("\n# ── 升级自动补齐 ──\n");
+            fw.write("\n");
             fw.write(add.toString());
-            logi("已补齐缺失配置键: " + add.toString().replace('\n', ' '));
+            logi("已补齐 " + added + " 个缺失配置键（带分组与说明）");
         } catch (Throwable t) {
             loge("补写配置失败: " + t);
         }
@@ -1579,8 +2176,34 @@ public class MainHook implements IXposedHookLoadPackage {
 
     private void logi(String s) {
         if (!cfgLog) return;
+        if (!passFilter(s)) return;
         Log.i(TAG, s);
         XposedBridge.log(TAG + ": " + s);
+    }
+
+    /** 按 [tag] 前缀过滤日志；logFilter 为空则全部通过 */
+    private boolean passFilter(String s) {
+        if (logFilter.isEmpty()) return true;
+        if (s == null) return false;
+        int l = s.indexOf('[');
+        if (l != 0) return false;
+        int r = s.indexOf(']', l);
+        if (r < 0) return false;
+        return logFilter.contains(s.substring(l + 1, r));
+    }
+
+    /** 供 TiltSwitch 复用的过滤判断 */
+    boolean logAllowed(String tag) {
+        return logFilter.isEmpty() || logFilter.contains(tag);
+    }
+
+    /** 供扩展模块输出带标签的日志，走统一过滤 */
+    void logiTag(String tag, String msg) {
+        if (!cfgLog) return;
+        if (!logAllowed(tag)) return;
+        String line = "[" + tag + "] " + msg;
+        Log.i(TAG, line);
+        XposedBridge.log(TAG + ": " + line);
     }
 
     private void loge(String s) {

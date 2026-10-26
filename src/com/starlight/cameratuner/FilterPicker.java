@@ -9,6 +9,7 @@ import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -158,76 +159,230 @@ public final class FilterPicker {
         return -1;
     }
 
-    /** 构造三段式渐变条 */
-    private static GradientDrawable gradient(int left, int mid, int right, boolean highlight) {
+    /** 渐变背景 */
+    private static GradientDrawable gradient(int left, int mid, int right) {
         GradientDrawable g = new GradientDrawable(
                 GradientDrawable.Orientation.LEFT_RIGHT,
                 new int[]{left, mid, right});
-        g.setCornerRadius(14f);
-        int strokeW = highlight ? 4 : 2;
-        int strokeC = highlight ? MainActivity.C_ACCENT : 0x33000000;
-        g.setStroke(strokeW, strokeC);
+        g.setCornerRadius(8f);
         return g;
     }
 
-    /** 弹出滤镜选择器 */
+    /** 弹出滤镜选择器（分组卡片式） */
     public static void show(final MainActivity a, final String key, int current) {
-        final LinearLayout root = new LinearLayout(a);
+        final android.app.Dialog dlg = new android.app.Dialog(a);
+        dlg.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
+
+        LinearLayout root = new LinearLayout(a);
         root.setOrientation(LinearLayout.VERTICAL);
-        int pad = a.dp(12);
-        root.setPadding(pad, a.dp(4), pad, a.dp(4));
+        root.setPadding(a.dp(16), a.dp(18), a.dp(16), a.dp(14));
 
-        final ScrollView sv = new ScrollView(a);
-        final LinearLayout list = new LinearLayout(a);
-        list.setOrientation(LinearLayout.VERTICAL);
-        sv.addView(list);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(0xF7FFFFFF);
+        bg.setCornerRadius(a.dp(26));
+        bg.setStroke(a.dp(1), 0xE6FFFFFF);
+        root.setBackground(bg);
+
+        // ---------- 标题 ----------
+        LinearLayout titleRow = new LinearLayout(a);
+        titleRow.setOrientation(LinearLayout.HORIZONTAL);
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
+
+        LinearLayout tcol = new LinearLayout(a);
+        tcol.setOrientation(LinearLayout.VERTICAL);
+        tcol.setLayoutParams(new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView title = new TextView(a);
+        title.setText("选择滤镜");
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17.5f);
+        title.setTextColor(MainActivity.C_TEXT_MAIN);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        tcol.addView(title);
+
+        TextView sub = new TextView(a);
+        sub.setText("传奇一瞬 · " + FILTERS.length + " 款");
+        sub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f);
+        sub.setTextColor(MainActivity.C_TEXT_SUB);
+        sub.setPadding(0, a.dp(2), 0, 0);
+        tcol.addView(sub);
+
+        titleRow.addView(tcol);
+
+        TextView cur = new TextView(a);
+        cur.setText("当前 " + nameOf(current));
+        cur.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        cur.setTextColor(MainActivity.C_ACCENT_DK);
+        cur.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        cur.setPadding(a.dp(11), a.dp(5), a.dp(11), a.dp(5));
+        GradientDrawable curBg = new GradientDrawable();
+        curBg.setColor(MainActivity.C_PINK_TINT);
+        curBg.setCornerRadius(a.dp(20));
+        cur.setBackground(curBg);
+        titleRow.addView(cur);
+
+        LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        titleLp.bottomMargin = a.dp(10);
+        root.addView(titleRow, titleLp);
+
+        // ---------- 滚动区 ----------
+        ScrollView sv = new ScrollView(a);
+        sv.setClipToPadding(false);
+        // 自定义细滚动条，替换系统默认的粗灰条
+        GradientDrawable thumb = new GradientDrawable();
+        thumb.setColor(0x45E0567C);
+        thumb.setCornerRadius(a.dp(4));
+        thumb.setSize(a.dp(3), a.dp(36));
+        sv.setVerticalScrollbarThumbDrawable(thumb);
+        sv.setScrollbarFadingEnabled(false);
+        sv.setScrollBarStyle(View.SCROLLBARS_INSIDE_OVERLAY);
+        sv.setPadding(0, 0, a.dp(4), 0);
+        sv.setClipToPadding(false);
+
+        LinearLayout body = new LinearLayout(a);
+        body.setOrientation(LinearLayout.VERTICAL);
+        sv.addView(body);
+
+        int listH = (int) (a.getResources().getDisplayMetrics().heightPixels * 0.58f);
         root.addView(sv, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, a.dp(500)));
+                ViewGroup.LayoutParams.MATCH_PARENT, listH));
 
-        final AlertDialog[] holder = new AlertDialog[1];
-
+        // ---------- 按分组构建卡片 ----------
         int lastGroup = -1;
-        for (final Object[] f : FILTERS) {
+        LinearLayout card = null;
+        int inGroupIdx = 0;
+        int groupCount = 0;
+
+        for (int i = 0; i < FILTERS.length; i++) {
+            final Object[] f = FILTERS[i];
             final int id = ((Integer) f[0]).intValue();
-            String en = (String) f[1];
             String cn = (String) f[2];
             int grp = ((Integer) f[3]).intValue();
-            int cL = ((Integer) f[4]).intValue();
-            int cM = ((Integer) f[5]).intValue();
-            int cR = ((Integer) f[6]).intValue();
-            String desc = (String) f[7];
 
             if (grp != lastGroup) {
+                // 收尾上一个分组
+                card = null;
                 lastGroup = grp;
+                inGroupIdx = 0;
+
+                // 统计本组数量
+                groupCount = 0;
+                for (Object[] g : FILTERS) {
+                    if (((Integer) g[3]).intValue() == grp) groupCount++;
+                }
+
+                // 分组标题：竖条 + 文字
+                LinearLayout hRow = new LinearLayout(a);
+                hRow.setOrientation(LinearLayout.HORIZONTAL);
+                hRow.setGravity(Gravity.CENTER_VERTICAL);
+
+                View bar = new View(a);
+                GradientDrawable barBg = new GradientDrawable();
+                barBg.setColor(MainActivity.C_ACCENT);
+                barBg.setCornerRadius(a.dp(2));
+                bar.setBackground(barBg);
+                LinearLayout.LayoutParams barLp = new LinearLayout.LayoutParams(
+                        a.dp(3), a.dp(13));
+                barLp.rightMargin = a.dp(8);
+                hRow.addView(bar, barLp);
+
                 TextView h = new TextView(a);
                 h.setText(GROUPS[grp]);
-                h.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-                h.setTextColor(0xFF999999);
-                h.setPadding(a.dp(6), a.dp(16), a.dp(6), a.dp(6));
-                list.addView(h);
+                h.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+                h.setTextColor(MainActivity.C_TEXT_SUB);
+                h.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+                hRow.addView(h);
+
+                LinearLayout.LayoutParams hLp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                hLp.topMargin = a.dp(12);
+                hLp.bottomMargin = a.dp(7);
+                hLp.leftMargin = a.dp(4);
+                body.addView(hRow, hLp);
+
+                // 新建组卡片
+                card = new LinearLayout(a);
+                card.setOrientation(LinearLayout.VERTICAL);
+                GradientDrawable cbg = new GradientDrawable();
+                cbg.setColor(0x8CFFFFFF);
+                cbg.setCornerRadius(a.dp(18));
+                cbg.setStroke(a.dp(1), 0xB0FFFFFF);
+                card.setBackground(cbg);
+                card.setClipToOutline(true);
+
+                LinearLayout.LayoutParams cLp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                cLp.bottomMargin = a.dp(4);
+                body.addView(card, cLp);
             }
 
             final boolean selected = id == current;
 
+            // ---------- 单行 ----------
             LinearLayout row = new LinearLayout(a);
             row.setOrientation(LinearLayout.HORIZONTAL);
             row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setPadding(a.dp(10), a.dp(10), a.dp(10), a.dp(10));
+            row.setPadding(a.dp(12), a.dp(10), a.dp(12), a.dp(10));
+
             if (selected) {
-                GradientDrawable bg = new GradientDrawable();
-                bg.setColor(0x0F000000);
-                bg.setCornerRadius(a.dp(10));
-                row.setBackground(bg);
+                GradientDrawable rowBg = new GradientDrawable();
+                rowBg.setCornerRadius(a.dp(14));
+                rowBg.setColor(MainActivity.C_PINK_TINT);
+                row.setBackground(rowBg);
             }
 
-            // 渐变条
+            // 色条
+            FrameLayout swWrap = new FrameLayout(a);
+            LinearLayout.LayoutParams swLp = new LinearLayout.LayoutParams(
+                    a.dp(52), a.dp(30));
+            swLp.rightMargin = a.dp(12);
+            swWrap.setLayoutParams(swLp);
+
             View swatch = new View(a);
-            LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(
-                    a.dp(56), a.dp(28));
-            sp.rightMargin = a.dp(12);
-            swatch.setLayoutParams(sp);
-            swatch.setBackground(gradient(cL, cM, cR, selected));
-            row.addView(swatch);
+            swatch.setBackground(gradient(
+                    ((Integer) f[4]).intValue(),
+                    ((Integer) f[5]).intValue(),
+                    ((Integer) f[6]).intValue()));
+            // 圆角裁剪
+            final int cr = a.dp(9);
+            swatch.setOutlineProvider(new android.view.ViewOutlineProvider() {
+                public void getOutline(View v, android.graphics.Outline o) {
+                    o.setRoundRect(0, 0, v.getWidth(), v.getHeight(), cr);
+                }
+            });
+            swatch.setClipToOutline(true);
+            swWrap.addView(swatch, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+            // 选中描边环
+            if (selected) {
+                View ring = new View(a);
+                GradientDrawable ringBg = new GradientDrawable();
+                ringBg.setColor(0x00000000);
+                ringBg.setCornerRadius(a.dp(9));
+                ringBg.setStroke(a.dp(2), MainActivity.C_ACCENT);
+                ring.setBackground(ringBg);
+                swWrap.addView(ring, new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            }
+
+            // 光泽：顶部一条白色半透明
+            View gloss = new View(a);
+            GradientDrawable glossBg = new GradientDrawable(
+                    GradientDrawable.Orientation.TOP_BOTTOM,
+                    new int[]{0x33FFFFFF, 0x00FFFFFF});
+            gloss.setBackground(glossBg);
+            gloss.setOutlineProvider(new android.view.ViewOutlineProvider() {
+                public void getOutline(View v, android.graphics.Outline o) {
+                    o.setRoundRect(0, 0, v.getWidth(), v.getHeight(), cr);
+                }
+            });
+            gloss.setClipToOutline(true);
+            swWrap.addView(gloss, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+            row.addView(swWrap);
 
             // 文字
             LinearLayout col = new LinearLayout(a);
@@ -237,54 +392,154 @@ public final class FilterPicker {
 
             TextView t = new TextView(a);
             t.setText(cn);
-            t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
-            t.setTextColor(selected ? MainActivity.C_ACCENT : 0xFF222222);
+            t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+            t.setTextColor(selected ? MainActivity.C_ACCENT_DK : MainActivity.C_TEXT_MAIN);
             if (selected) {
-                t.setTypeface(Typeface.DEFAULT_BOLD);
+                t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
             }
             col.addView(t);
 
-            TextView sub = new TextView(a);
-            sub.setText(en + " · " + id + "　" + desc);
-            sub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
-            sub.setTextColor(0xFF9A9A9A);
-            sub.setPadding(0, a.dp(2), 0, 0);
-            col.addView(sub);
+            TextView d = new TextView(a);
+            d.setText((String) f[7]);
+            d.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+            d.setTextColor(MainActivity.C_TEXT_SUB);
+            d.setPadding(0, a.dp(2), 0, 0);
+            d.setMaxLines(1);
+            d.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            col.addView(d);
 
             row.addView(col);
 
+            if (selected) {
+                TextView tick = new TextView(a);
+                tick.setText("✓");
+                tick.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+                tick.setTextColor(MainActivity.C_ACCENT);
+                tick.setTypeface(Typeface.DEFAULT_BOLD);
+                tick.setPadding(a.dp(6), 0, a.dp(2), 0);
+                row.addView(tick);
+            }
+
+            row.setClickable(true);
+            row.setOnTouchListener(new View.OnTouchListener() {
+                public boolean onTouch(View v, android.view.MotionEvent e) {
+                    if (e.getActionMasked() == android.view.MotionEvent.ACTION_DOWN) {
+                        v.animate().scaleX(0.985f).scaleY(0.985f).setDuration(80).start();
+                    } else if (e.getActionMasked() == android.view.MotionEvent.ACTION_UP
+                            || e.getActionMasked() == android.view.MotionEvent.ACTION_CANCEL) {
+                        v.animate().scaleX(1f).scaleY(1f).setDuration(120).start();
+                    }
+                    return false;
+                }
+            });
             row.setOnClickListener(new View.OnClickListener() {
-                @Override
                 public void onClick(View v) {
                     a.writeConfig(key, String.valueOf(id));
-                    if (holder[0] != null) {
-                        holder[0].dismiss();
-                    }
+                    dlg.dismiss();
                     a.refreshCurrentPage();
                 }
             });
-            list.addView(row);
+
+            card.addView(row, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+            inGroupIdx++;
+
+            // 组内分隔线（最后一行不加）
+            if (inGroupIdx < groupCount) {
+                View line = new View(a);
+                line.setBackgroundColor(0x0C000000);
+                LinearLayout.LayoutParams lp2 = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, a.dp(1));
+                lp2.leftMargin = a.dp(76);
+                lp2.rightMargin = a.dp(12);
+                card.addView(line, lp2);
+            }
         }
 
+        // ---------- 按钮 ----------
+        LinearLayout btnRow = new LinearLayout(a);
+        btnRow.setOrientation(LinearLayout.HORIZONTAL);
+        btnRow.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams btnLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        btnLp.topMargin = a.dp(12);
+
         final int defId = defaultOf(key);
-        AlertDialog.Builder b = new AlertDialog.Builder(a)
-                .setTitle("选择滤镜 · 当前 " + nameOf(current))
-                .setView(root)
-                .setNegativeButton("取消", null);
         if (defId > 0) {
-            b.setNeutralButton("恢复默认", new DialogInterface.OnClickListener() {
-                @Override
-                public void onClick(DialogInterface d, int which) {
+            btnRow.addView(makeBtn(a, "↺  恢复默认", 0, new View.OnClickListener() {
+                public void onClick(View v) {
                     a.writeConfig(key, String.valueOf(defId));
-                    if (holder[0] != null) {
-                        holder[0].dismiss();
-                    }
+                    dlg.dismiss();
                     a.refreshCurrentPage();
                 }
-            });
+            }));
         }
-        AlertDialog dlg = b.create();
-        holder[0] = dlg;
+        btnRow.addView(makeBtn(a, "取消", 1, new View.OnClickListener() {
+            public void onClick(View v) { dlg.dismiss(); }
+        }));
+
+        root.addView(btnRow, btnLp);
+
+        dlg.setContentView(root);
+
+        android.view.Window w = dlg.getWindow();
+        if (w != null) {
+            w.setBackgroundDrawableResource(android.R.color.transparent);
+            w.addFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            android.view.WindowManager.LayoutParams lp = w.getAttributes();
+            lp.dimAmount = 0.45f;
+            w.setAttributes(lp);
+            int width = (int) (a.getResources().getDisplayMetrics().widthPixels * 0.92f);
+            w.setLayout(width, ViewGroup.LayoutParams.WRAP_CONTENT);
+        }
+
         dlg.show();
+    }
+
+    /**
+     * 胶囊按钮
+     * @param style 0 = 强调（浅玫红底 + 玫红字）  1 = 次要（透明 + 描边）
+     */
+    private static View makeBtn(final MainActivity a, String text, int style, View.OnClickListener l) {
+        TextView b = new TextView(a);
+        b.setText(text);
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f);
+        b.setGravity(Gravity.CENTER);
+        b.setIncludeFontPadding(false);
+        b.setPadding(a.dp(16), a.dp(10), a.dp(16), a.dp(10));
+
+        GradientDrawable bg = new GradientDrawable();
+        bg.setCornerRadius(a.dp(15));
+        if (style == 0) {
+            bg.setColor(MainActivity.C_PINK_TINT);
+            bg.setStroke(a.dp(1), 0x33E0567C);
+            b.setTextColor(MainActivity.C_ACCENT_DK);
+            b.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        } else {
+            bg.setColor(0x00000000);
+            bg.setStroke(a.dp(1), 0x1F000000);
+            b.setTextColor(0xFF6E6875);
+        }
+        b.setBackground(bg);
+
+        b.setOnTouchListener(new View.OnTouchListener() {
+            public boolean onTouch(View v, android.view.MotionEvent e) {
+                if (e.getActionMasked() == android.view.MotionEvent.ACTION_DOWN) {
+                    v.animate().scaleX(0.94f).scaleY(0.94f).setDuration(90).start();
+                } else if (e.getActionMasked() == android.view.MotionEvent.ACTION_UP
+                        || e.getActionMasked() == android.view.MotionEvent.ACTION_CANCEL) {
+                    v.animate().scaleX(1f).scaleY(1f).setDuration(120).start();
+                }
+                return false;
+            }
+        });
+        b.setOnClickListener(l);
+
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.leftMargin = a.dp(8);
+        b.setLayoutParams(lp);
+        return b;
     }
 }

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 焦段重映射：镜头（双同心圆 + 光圈点） -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <path
+        android:pathData="M12,3.2a8.8,8.8 0 1,0 0,17.6 8.8,8.8 0 0,0 0,-17.6z"
+        android:strokeColor="#FF000000"
+        android:strokeWidth="2"
+        android:fillColor="#00000000" />
+    <path
+        android:pathData="M12,8.4a3.6,3.6 0 1,0 0,7.2 3.6,3.6 0 0,0 0,-7.2z"
+        android:strokeColor="#FF000000"
+        android:strokeWidth="2"
+        android:fillColor="#00000000" />
+    <path
+        android:pathData="M12,11.6a0.4,0.4 0 1,0 0,0.8 0.4,0.4 0 0,0 0,-0.8z"
+        android:strokeColor="#FF000000"
+        android:strokeWidth="1.4"
+        android:fillColor="#00000000" />
+</vector>

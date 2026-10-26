@@ -1,7 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- AI 帮拍：四角星（AI 感）。线条 2dp -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp" android:height="24dp"
     android:viewportWidth="24" android:viewportHeight="24">
-    <path android:fillColor="#FF000000"
-        android:pathData="M11.5,9.6L9.4,4.6 7.3,9.6 2.3,11.7l5,2.1 2.1,5 2.1,-5 5,-2.1 -5,-2.1zM19,3l-0.9,2.1L16,6l2.1,0.9L19,9l0.9,-2.1L22,6l-2.1,-0.9L19,3zM18.6,14.4l-1.2,2.8 -2.8,1.2 2.8,1.2 1.2,2.8 1.2,-2.8 2.8,-1.2 -2.8,-1.2 -1.2,-2.8z"/>
+    <path
+        android:pathData="M12,3l2,5.2 5.2,2 -5.2,2 -2,5.2 -2,-5.2 -5.2,-2 5.2,-2z"
+        android:strokeColor="#FF000000"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:fillColor="#00000000" />
+    <path
+        android:pathData="M18.4,16.2l0.9,2.3 2.3,0.9 -2.3,0.9 -0.9,2.3 -0.9,-2.3 -2.3,-0.9 2.3,-0.9z"
+        android:strokeColor="#FF000000"
+        android:strokeWidth="1.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:fillColor="#00000000" />
 </vector>

@@ -1,0 +1,417 @@
+package com.starlight.cameratuner;
+
+import android.animation.ValueAnimator;
+import android.content.Context;
+import android.graphics.Canvas;
+import android.graphics.LinearGradient;
+import android.graphics.Paint;
+import android.graphics.RectF;
+import android.graphics.Shader;
+import android.view.MotionEvent;
+import android.view.VelocityTracker;
+import android.view.View;
+import android.view.ViewConfiguration;
+import android.view.animation.DecelerateInterpolator;
+
+/**
+ * 液态玻璃导航栏（自绘）  2026-10-26
+ *
+ * 参考 /sdcard/工作目录/液态玻璃.html 的实现思路：
+ *   1. 外框：半透明白玻璃 + 5 层 inset 边缘光（上亮下暗左右微亮，模拟玻璃厚边）
+ *   2. 流光：一道斜向高光带缓慢扫过，让静止的玻璃"活"起来
+ *   3. 胶囊：可拖动跟手，松手吸附到最近的 tab
+ *
+ * 内部坐标系：
+ *   - 外框圆角 = 高度/2（胶囊形）
+ *   - 胶囊区域 = 外框内缩 padding
+ *   - tab 等宽平分可用宽度
+ *
+ * 子 View 布局：
+ *   本 View 内放 3 个 tab 容器（LinearLayout），由外部通过 addTab() 添加，
+ *   本 View 负责在最底层绘制玻璃与胶囊。
+ */
+public class GlassNavView extends View {
+
+    public interface OnTabSelectedListener {
+        void onTabSelected(int index, boolean fromDrag);
+    }
+
+    private static final int TAB_COUNT = 3;
+
+    // ---------- 配色（与 MainActivity 保持一致） ----------
+    private static final int C_GLASS_BODY   = 0xD9FFFFFF; // 85% 白：玻璃主体
+    private static final int C_PILL         = 0xFFFFE8EF; // 浅粉：胶囊
+    private static final int C_PILL_STROKE  = 0x33E0567C;
+
+    // ---------- 尺寸（dp） ----------
+    private static final float PAD          = 4f;   // 外框内边距
+    private static final float BLUR_FEEL    = 1f;   // 描边厚度基准
+
+    // ---------- 绘制工具 ----------
+    private final Paint bodyPaint   = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint edgePaint   = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint pillPaint   = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint sheenPaint  = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final RectF tmpRect     = new RectF();
+
+    // ---------- 胶囊状态 ----------
+    private float pillLeft = 0f;
+    private float pillWidth = 0f;
+    private int currentIndex = 0;
+
+    // ---------- 拖动状态 ----------
+    private boolean dragging = false;
+    private boolean pointerDown = false;
+    private float downX = 0f;
+    private float grabOffset = 0f;
+    private final int touchSlop;
+    private VelocityTracker tracker;
+
+    // ---------- 流光 ----------
+    private float sheenPos = 1.5f;   // 0..1 表示扫过进度，1.5 表示在屏幕外
+    private ValueAnimator sheenAnim;
+    private LinearGradient sheenGradient;
+
+    private OnTabSelectedListener listener;
+    private final float density;
+
+    public GlassNavView(Context c) {
+        super(c);
+        density = getResources().getDisplayMetrics().density;
+        touchSlop = ViewConfiguration.get(c).getScaledTouchSlop();
+        setWillNotDraw(false);
+        setClickable(true);
+        startSheen();
+    }
+
+    public void setOnTabSelectedListener(OnTabSelectedListener l) {
+        this.listener = l;
+    }
+
+    // ==================== 流光动画 ====================
+
+    private void startSheen() {
+        if (sheenAnim != null) sheenAnim.cancel();
+        sheenAnim = ValueAnimator.ofFloat(1.4f, -0.5f);
+        sheenAnim.setDuration(7000);
+        sheenAnim.setStartDelay(1800);
+        sheenAnim.setInterpolator(new DecelerateInterpolator(1.2f));
+        sheenAnim.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+            public void onAnimationUpdate(ValueAnimator a) {
+                sheenPos = (Float) a.getAnimatedValue();
+                invalidate();
+            }
+        });
+        sheenAnim.start();
+        // 循环：用 postDelayed 重启，避免 repeat 模式跳帧
+        postDelayed(new Runnable() {
+            public void run() {
+                startSheen();
+            }
+        }, 7000 + 1800 + 9000); // 动画时长 + 延迟 + 间隔
+    }
+
+    // ==================== 尺寸计算 ====================
+
+    private float dp(float v) { return v * density; }
+
+    /** 单个 tab 的宽度 */
+    private float tabWidth() {
+        float inner = getWidth() - dp(PAD) * 2;
+        return inner / TAB_COUNT;
+    }
+
+    /** 第 i 个 tab 的左边 x（在本 View 坐标系） */
+    private float tabLeft(int i) {
+        return dp(PAD) + tabWidth() * i;
+    }
+
+    // ==================== 绘制 ====================
+
+    @Override
+    protected void onDraw(Canvas canvas) {
+        float w = getWidth();
+        float h = getHeight();
+        if (w <= 0 || h <= 0) return;
+
+        float r = h / 2f;
+
+        // ---------- 1. 玻璃主体 ----------
+        tmpRect.set(0, 0, w, h);
+        bodyPaint.setStyle(Paint.Style.FILL);
+        bodyPaint.setColor(C_GLASS_BODY);
+        canvas.drawRoundRect(tmpRect, r, r, bodyPaint);
+
+        // ---------- 2. 五层边缘光（玻璃厚边） ----------
+        drawGlassEdges(canvas, w, h, r);
+
+        // ---------- 3. 流光扫过 ----------
+        drawSheen(canvas, w, h);
+
+        // ---------- 4. 胶囊 ----------
+        drawPill(canvas, h);
+    }
+
+    /**
+     * 5 层 inset 边缘光 —— 这是"玻璃厚边"的全部秘密
+     *   上边 1.5dp 亮白（最主要的高光）
+     *   下边 1dp 稍暗
+     *   左右各 1dp 微亮
+     * 再叠一圈极淡的外描边
+     */
+    private void drawGlassEdges(Canvas canvas, float w, float h, float r) {
+        edgePaint.setStyle(Paint.Style.STROKE);
+
+        // 上边高光：粗一点、亮一点
+        edgePaint.setStrokeWidth(dp(1.6f));
+        edgePaint.setColor(0xCCFFFFFF);
+        tmpRect.set(dp(0.8f), dp(0.8f), w - dp(0.8f), h - dp(0.8f));
+        canvas.drawRoundRect(tmpRect, r, r, edgePaint);
+
+        // 上边再叠一层更亮的内高光
+        edgePaint.setStrokeWidth(dp(0.8f));
+        edgePaint.setColor(0xE6FFFFFF);
+        tmpRect.set(dp(1.6f), dp(1.6f), w - dp(1.6f), h - dp(1.6f));
+        canvas.drawRoundRect(tmpRect, r, r, edgePaint);
+
+        // 外圈淡描边（定义轮廓）
+        edgePaint.setStrokeWidth(dp(0.8f));
+        edgePaint.setColor(0x40B090B8);
+        tmpRect.set(dp(0.4f), dp(0.4f), w - dp(0.4f), h - dp(0.4f));
+        canvas.drawRoundRect(tmpRect, r, r, edgePaint);
+
+        // 下边暗线：用一条水平细线模拟
+        edgePaint.setStrokeWidth(dp(1.2f));
+        edgePaint.setColor(0x14000000);
+        canvas.drawLine(dp(8), h - dp(1.2f), w - dp(8), h - dp(1.2f), edgePaint);
+    }
+
+    /** 流光：一道斜向高光带扫过 */
+    private void drawSheen(Canvas canvas, float w, float h) {
+        // 用 sheenPos 控制渐变在横向的偏移
+        float bandCenter = sheenPos * w;
+        float half = w * 0.28f;
+
+        float sx = bandCenter - half;
+        float ex = bandCenter + half;
+
+        sheenGradient = new LinearGradient(
+                sx, 0, ex, 0,
+                new int[]{0x00FFFFFF, 0x26FFFFFF, 0x66FFFFFF, 0x26FFFFFF, 0x00FFFFFF},
+                new float[]{0f, 0.3f, 0.5f, 0.7f, 1f},
+                Shader.TileMode.CLAMP);
+
+        // 整个流光只在水平方向贴图，会被圆角裁剪
+        sheenPaint.setShader(sheenGradient);
+        sheenPaint.setStyle(Paint.Style.FILL);
+
+        canvas.save();
+        float r = h / 2f;
+        tmpRect.set(0, 0, w, h);
+        android.graphics.Path clip = new android.graphics.Path();
+        clip.addRoundRect(tmpRect, r, r, android.graphics.Path.Direction.CW);
+        canvas.clipPath(clip);
+        canvas.drawRect(0, 0, w, h, sheenPaint);
+        canvas.restore();
+
+        sheenPaint.setShader(null);
+    }
+
+    /** 拇指胶囊：浅粉底 + 内高光 + 极淡描边 + 柔影 */
+    private void drawPill(Canvas canvas, float h) {
+        if (pillWidth <= 0) return;
+
+        float top = dp(PAD);
+        float bottom = h - dp(PAD);
+        float pyr = (bottom - top) / 2f;
+
+        // 柔影（先画大一圈的半透明）
+        pillPaint.setStyle(Paint.Style.FILL);
+        pillPaint.setColor(0x14E0567C);
+        tmpRect.set(pillLeft - dp(1), top - dp(1), pillLeft + pillWidth + dp(1), bottom + dp(1));
+        canvas.drawRoundRect(tmpRect, pyr + dp(1), pyr + dp(1), pillPaint);
+
+        // 主体
+        pillPaint.setColor(C_PILL);
+        tmpRect.set(pillLeft, top, pillLeft + pillWidth, bottom);
+        canvas.drawRoundRect(tmpRect, pyr, pyr, pillPaint);
+
+        // 内高光（顶部一条亮线）
+        pillPaint.setStyle(Paint.Style.STROKE);
+        pillPaint.setStrokeWidth(dp(1f));
+        pillPaint.setColor(0x80FFFFFF);
+        tmpRect.set(pillLeft + dp(0.5f), top + dp(0.5f),
+                pillLeft + pillWidth - dp(0.5f), bottom - dp(0.5f));
+        canvas.drawRoundRect(tmpRect, pyr, pyr, pillPaint);
+
+        // 描边
+        pillPaint.setStrokeWidth(dp(0.8f));
+        pillPaint.setColor(C_PILL_STROKE);
+        tmpRect.set(pillLeft, top, pillLeft + pillWidth, bottom);
+        canvas.drawRoundRect(tmpRect, pyr, pyr, pillPaint);
+    }
+
+    // ==================== 尺寸变化 ====================
+
+    @Override
+    protected void onLayout(boolean changed, int l, int t, int r, int b) {
+        super.onLayout(changed, l, t, r, b);
+        // onLayout 时 getWidth() 已经是最终值，这里算胶囊位置最可靠
+        int w = r - l;
+        int h = b - t;
+        if (w <= 0 || h <= 0) return;
+        // 只在首次（胶囊还没初始化）时定位，避免打断动画与拖动
+        if (pillWidth <= 0) {
+            pillLeft = tabLeft(currentIndex);
+            pillWidth = tabWidth();
+            invalidate();
+        }
+    }
+
+    @Override
+    protected void onSizeChanged(int w, int h, int ow, int oh) {
+        super.onSizeChanged(w, h, ow, oh);
+        // 尺寸变了，胶囊位置要重算
+        if (w > 0 && h > 0 && pillWidth > 0) {
+            pillLeft = tabLeft(currentIndex);
+            pillWidth = tabWidth();
+            invalidate();
+        }
+    }
+
+    // ==================== 对外接口 ====================
+
+    /** 外部切页时调用：让胶囊滑到对应位置 */
+    public void setCurrentIndex(int index, boolean animate) {
+        if (index < 0 || index >= TAB_COUNT) return;
+        currentIndex = index;
+        snapTo(index, animate);
+    }
+
+    public int getCurrentIndex() { return currentIndex; }
+
+    private void snapTo(int index, boolean animate) {
+        float targetX = tabLeft(index);
+        float targetW = tabWidth();
+
+        if (!animate) {
+            pillLeft = targetX;
+            pillWidth = targetW;
+            invalidate();
+            return;
+        }
+
+        final float startX = pillLeft;
+        final float startW = pillWidth;
+        final float endX = targetX;
+        final float endW = targetW;
+
+        ValueAnimator a = ValueAnimator.ofFloat(0f, 1f);
+        a.setDuration(520);
+        // 与 HTML 一致的柔和贝塞尔：0.25, 1, 0.5, 1
+        a.setInterpolator(new android.view.animation.PathInterpolator(0.25f, 1f, 0.5f, 1f));
+        a.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+            public void onAnimationUpdate(ValueAnimator anim) {
+                float t = (Float) anim.getAnimatedValue();
+                pillLeft = startX + (endX - startX) * t;
+                pillWidth = startW + (endW - startW) * t;
+                invalidate();
+            }
+        });
+        a.start();
+    }
+
+    // ==================== 触摸：拖动胶囊 ====================
+
+    @Override
+    public boolean onTouchEvent(MotionEvent ev) {
+        if (pillWidth <= 0) return super.onTouchEvent(ev);
+
+        switch (ev.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN: {
+                downX = ev.getX();
+                pointerDown = true;
+                dragging = false;
+                // 按住点是否在胶囊范围内？决定拖动时胶囊跟着哪个偏移
+                if (downX >= pillLeft && downX <= pillLeft + pillWidth) {
+                    grabOffset = downX - pillLeft;
+                } else {
+                    grabOffset = pillWidth / 2f;
+                }
+                if (tracker == null) tracker = VelocityTracker.obtain();
+                tracker.clear();
+                tracker.addMovement(ev);
+                return true;
+            }
+
+            case MotionEvent.ACTION_MOVE: {
+                if (!pointerDown) break;
+                if (tracker != null) tracker.addMovement(ev);
+
+                if (!dragging) {
+                    if (Math.abs(ev.getX() - downX) < touchSlop) return true;
+                    dragging = true;
+                }
+
+                float targetX = ev.getX() - grabOffset;
+                float maxX = getWidth() - dp(PAD) - pillWidth;
+                float minX = dp(PAD);
+                if (targetX < minX) targetX = minX;
+                if (targetX > maxX) targetX = maxX;
+                pillLeft = targetX;
+                invalidate();
+                return true;
+            }
+
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL: {
+                pointerDown = false;
+                if (tracker != null) {
+                    tracker.recycle();
+                    tracker = null;
+                }
+
+                if (!dragging) {
+                    // 没拖动 = 点击：判断点在哪
+                    int idx = indexAt(ev.getX());
+                    currentIndex = idx;
+                    snapTo(idx, true);
+                    if (listener != null) listener.onTabSelected(idx, false);
+                    return true;
+                }
+
+                // 拖动结束：找中心最近的 tab
+                int nearest = nearestIndexTo(pillLeft + pillWidth / 2f);
+                boolean changed = nearest != currentIndex;
+                currentIndex = nearest;
+                snapTo(nearest, true);
+                if (listener != null) listener.onTabSelected(nearest, changed);
+                dragging = false;
+                return true;
+            }
+        }
+        return super.onTouchEvent(ev);
+    }
+
+    private int indexAt(float x) {
+        float tw = tabWidth();
+        int idx = (int) ((x - dp(PAD)) / tw);
+        if (idx < 0) idx = 0;
+        if (idx >= TAB_COUNT) idx = TAB_COUNT - 1;
+        return idx;
+    }
+
+    private int nearestIndexTo(float center) {
+        int best = 0;
+        float bestDist = Float.MAX_VALUE;
+        for (int i = 0; i < TAB_COUNT; i++) {
+            float tc = tabLeft(i) + tabWidth() / 2f;
+            float d = Math.abs(tc - center);
+            if (d < bestDist) {
+                bestDist = d;
+                best = i;
+            }
+        }
+        return best;
+    }
+}

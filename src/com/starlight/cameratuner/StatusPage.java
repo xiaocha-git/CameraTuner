@@ -25,12 +25,13 @@ public class StatusPage {
 
     ScrollView build() {
         ScrollView sv = new ScrollView(a);
-        sv.setBackgroundColor(MainActivity.C_BG);
+        Ui.customScrollbar(a, sv);
+        sv.setBackgroundColor(0x00000000);
         sv.setClipToPadding(false);
 
         LinearLayout c = new LinearLayout(a);
         c.setOrientation(LinearLayout.VERTICAL);
-        c.setPadding(a.dp(16), a.dp(8), a.dp(16), a.dp(150));
+        c.setPadding(a.dp(16), a.getStatusBarHeight() + a.dp(8), a.dp(16), a.dp(110));
 
         c.addView(Ui.pageTitle(a, "Xiaomi CameraTuner"));
 
@@ -392,11 +393,12 @@ public class StatusPage {
     }
 
     private void confirmRestart() {
-        new android.app.AlertDialog.Builder(a)
-                .setTitle("重启相机")
-                .setMessage("将强制结束相机进程，运行中的拍摄会中断。继续？")
-                .setPositiveButton("确定", new android.content.DialogInterface.OnClickListener() {
-                    public void onClick(android.content.DialogInterface d, int w) {
+        TunerDialog.create(a)
+                .title("重启相机")
+                .message("将强制结束相机进程，运行中的拍摄会中断。继续？")
+                .negative("取消", null)
+                .positive("重启", new TunerDialog.OnAction() {
+                    public void onClick(TunerDialog d) {
                         a.execRootAsync("am force-stop " + MainActivity.CAMERA_PKG, new Runnable() {
                             public void run() {
                                 android.widget.Toast.makeText(a, "相机已结束",
@@ -405,7 +407,6 @@ public class StatusPage {
                         });
                     }
                 })
-                .setNegativeButton("取消", null)
                 .show();
     }
 }
